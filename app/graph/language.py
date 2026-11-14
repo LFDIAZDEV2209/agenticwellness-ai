@@ -124,6 +124,11 @@ _ES_MARKERS = frozenset(
 def detect_turn_language(state: AgentState) -> Literal["en", "es"] | None:
     """Devuelve un idioma claro; las señales mixtas o débiles conservan el de la app."""
     text = unicodedata.normalize("NFC", state.get("input", "")).lower()
+    # ASR puede entrecomillar toda la intervención, incluso con punto exterior.
+    # Esas comillas delimitan la voz; no convierten la pregunta entera en un título.
+    wrapped = text.strip().rstrip(".!?…").rstrip()
+    if len(wrapped) > 2 and {'"': '"', "'": "'", "“": "”"}.get(wrapped[0]) == wrapped[-1]:
+        text = wrapped[1:-1]
     # Un título citado en otro idioma no cambia el idioma de la conversación.
     text = re.sub(
         r'"[^"\n]{2,180}"|“[^”\n]{2,180}”|(?<!\w)\x27[^\x27\n]{2,180}\x27(?!\w)', " ", text

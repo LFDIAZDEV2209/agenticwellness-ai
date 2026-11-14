@@ -331,8 +331,10 @@ async def test_replay_revalidates_history_before_sending_old_answer(rig):
     assert len(rig.model.prompts) == 1
 
 
-async def test_native_language_tool_roundtrip_is_not_another_patient_turn(rig):
-    request = body("What does my nutrition plan include?", tools=LANGUAGE_TOOLS)
+@pytest.mark.parametrize("quoted_asr", [False, True])
+async def test_native_language_tool_roundtrip_is_not_another_patient_turn(rig, quoted_asr):
+    text = "What does my nutrition plan include?"
+    request = body(f'"{text}".' if quoted_asr else text, tools=LANGUAGE_TOOLS)
     switched = await post(rig, request)
     assert switched.status_code == 200
     chunks = [
@@ -362,7 +364,7 @@ async def test_native_language_tool_roundtrip_is_not_another_patient_turn(rig):
     assert answered.status_code == 200
     assert "Respuesta uno" in answered.text
     assert len(rig.store.receipts) == 1
-    assert rig.resolver.call_args.kwargs["text"] == "What does my nutrition plan include?"
+    assert rig.resolver.call_args.kwargs["text"] == request["messages"][0]["content"]
     assert len(rig.model.prompts) == 1
     assert (await post(rig, request)).status_code == 200
     assert rig.store.receipts[1].status == "completed" and len(rig.model.prompts) == 1

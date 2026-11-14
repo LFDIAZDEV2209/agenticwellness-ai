@@ -18,6 +18,11 @@ from tests.fakes import RecordingFakeModel
     ("text", "expected"),
     [
         ("How can I manage my anxiety?", "en"),
+        ('"What does my nutrition plan say for lunch today? Please answer briefly".', "en"),
+        ("“What does my nutrition plan say for lunch today?”", "en"),
+        ("'Please explain my plan'.", "en"),
+        ("“¿Qué dice mi plan nutricional?”", "es"),
+        ('"Summarize the document “Las heridas de la infancia” for me".', "en"),
         ("¿Cómo puedo controlar mi ansiedad?", "es"),
         ("Necesito ayuda con mis emociones", "es"),
         ("Ánimo", "es"),
