@@ -41,6 +41,14 @@ def guardrails_node(state: AgentState) -> dict:
     """
     result = check_input_guardrails(state.get("input", ""))
     configurable = get_config().get("configurable", {})
+    visible_input = result.sanitized
+    if configurable.get("message_channel") == "voice" and isinstance(
+        configurable.get("voice_user_text"), str
+    ):
+        fragment = check_input_guardrails(configurable["voice_user_text"])
+        visible_input = fragment.sanitized
+        if not fragment.safe:
+            result = fragment
     message_metadata = {
         "channel": configurable.get("message_channel", "text"),
         "status": "generated" if configurable.get("message_channel") == "voice" else "final",
@@ -90,7 +98,7 @@ def guardrails_node(state: AgentState) -> dict:
         # Una sola entrada por turno: el ciclo agent/tools reutiliza el historial.
         "messages": [
             HumanMessage(
-                content=result.sanitized,
+                content=visible_input,
                 id=configurable.get("user_message_id"),
                 additional_kwargs={
                     **message_metadata,

@@ -25,6 +25,7 @@ from app.vita.client import VitaAccessError, read_catalog
 from app.vita.locking import ThreadBusyError, thread_guard
 from app.vita.runtime import resolve_turn
 from app.voice.context import verify_context
+from app.voice.input import compose_voice_input
 from app.voice.language import (
     conversation_language,
     language_chunk,
@@ -201,7 +202,7 @@ async def completion(
         raise HTTPException(status_code=403, detail="voice_access_unavailable") from exc
 
     request = ChatRequest(
-        message=payload.messages[latest_user_index(payload.messages)].content,
+        message=compose_voice_input(payload.messages),
         user_id=record.user_id,
         patient_id=record.patient_id,
         thread_id=record.thread_id,
@@ -214,6 +215,7 @@ async def completion(
             "assistant_message_id": receipt.response_message_id,
             "message_channel": "voice",
             "voice_session_id": record.id,
+            "voice_user_text": payload.messages[latest_user_index(payload.messages)].content,
         }
     )
     try:
