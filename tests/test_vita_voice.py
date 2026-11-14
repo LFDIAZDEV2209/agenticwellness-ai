@@ -172,12 +172,12 @@ async def post(rig, payload=None, headers=None):
 LANGUAGE_TOOLS = [{"type": "function", "function": {"name": "language_detection"}}]
 
 
-async def test_app_language_is_not_assumed_to_be_the_providers_actual_language(rig):
+async def test_initial_sdk_language_does_not_trigger_redundant_preset_reset(rig):
     rig.store.record.language = "en"
     response = await post(rig, body("What is my assigned lunch?", tools=LANGUAGE_TOOLS))
-    assert response.status_code == 200 and "language_detection" in response.text
-    assert not rig.store.receipts
-    rig.resolver.assert_not_awaited()
+    assert response.status_code == 200 and "language_detection" not in response.text
+    assert rig.store.receipts[1].status == "completed"
+    rig.resolver.assert_awaited_once()
 
 
 async def test_language_switch_cannot_emit_after_concurrent_revocation(rig):

@@ -156,7 +156,7 @@ async def completion(
         await read_catalog(record.user_id)
         _check_rate_limit(http_request, record.user_id)
         ordinal, prefix, previous = history_identity(payload.messages)
-        switch = language_switch(payload.messages, payload.tools)
+        switch = language_switch(payload.messages, payload.tools, record.language)
         if switch:
 
             async def switch_language():
