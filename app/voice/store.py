@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Literal
+from uuid import uuid4
 
 from sqlalchemy import (
     Boolean,
@@ -176,9 +177,22 @@ class VoiceStore:
                 "counter_reused": latest is not None and provider_turn == latest.provider_turn,
             }
             if existing:
-                if existing.prefix_hash != prefix_hash or not flags["previous_hash_matches"]:
+                if not flags["previous_hash_matches"]:
                     raise VoiceContextError("voice_turn_conflict", 409, metadata=flags)
-                if latest.ordinal != ordinal or existing.status in {"superseded", "interrupted"}:
+                if existing.prefix_hash != prefix_hash:
+                    # ElevenLabs puede completar la última utterance mientras
+                    # aún se genera. Solo esa fila provisional es reemplazable;
+                    # el prefijo anterior queda intacto. El ID actúa como epoch
+                    # durable: A→B→A no vuelve a habilitar al primer runner A.
+                    if latest.ordinal != ordinal or existing.status not in {"running", "control"}:
+                        raise VoiceContextError("voice_turn_conflict", 409, metadata=flags)
+                    existing.prefix_hash = prefix_hash
+                    existing.status = "control" if phase == "control" else "running"
+                    existing.response_message_id = (
+                        f"voice:{binding.session_id}:{ordinal}:bot:{uuid4().hex}"
+                    )
+                    action = "control" if phase == "control" else "run"
+                elif latest.ordinal != ordinal or existing.status in {"superseded", "interrupted"}:
                     action = "obsolete"
                 elif existing.status == "completed":
                     action = "replay"
@@ -224,6 +238,7 @@ class VoiceStore:
             latest is None
             or latest.ordinal != admission.ordinal
             or latest.prefix_hash != admission.prefix_hash
+            or latest.response_message_id != admission.response_message_id
             or latest.status not in allowed
         ):
             raise VoiceContextError("voice_turn_obsolete", 409, metadata=admission.metadata)
@@ -258,6 +273,7 @@ class VoiceStore:
                 turn is None
                 or turn.ordinal != admission.ordinal
                 or turn.prefix_hash != admission.prefix_hash
+                or turn.response_message_id != admission.response_message_id
                 or turn.status != "running"
             ):
                 return False  # La limpieza vieja no pisa un turno nuevo/supersedido.
@@ -278,6 +294,7 @@ class VoiceStore:
                         latest is None
                         or latest.ordinal != admission.ordinal
                         or latest.prefix_hash != admission.prefix_hash
+                        or latest.response_message_id != admission.response_message_id
                         or latest.status in {"superseded", "interrupted"}
                     ):
                         return replace(admission, action="obsolete")

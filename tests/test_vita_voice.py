@@ -8,6 +8,7 @@ import asyncio
 import hashlib
 import json
 import time
+import uuid
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -92,9 +93,18 @@ class SimulatedStore:
                 "counter_reused": latest is not None and latest.provider_turn == provider_turn,
             }
             if existing:
-                if existing.prefix_hash != prefix or not flags["previous_hash_matches"]:
+                if not flags["previous_hash_matches"]:
                     raise VoiceContextError("voice_turn_conflict", 409, metadata=flags)
-                if latest.ordinal != ordinal or existing.status in {"interrupted", "superseded"}:
+                if existing.prefix_hash != prefix:
+                    if latest.ordinal != ordinal or existing.status not in {"running", "control"}:
+                        raise VoiceContextError("voice_turn_conflict", 409, metadata=flags)
+                    existing.prefix_hash = prefix
+                    existing.response_message_id = (
+                        f"voice:{binding.session_id}:{ordinal}:bot:{uuid.uuid4().hex}"
+                    )
+                    existing.status = "control" if phase == "control" else "running"
+                    action = "control" if phase == "control" else "run"
+                elif latest.ordinal != ordinal or existing.status in {"interrupted", "superseded"}:
                     action = "obsolete"
                 elif existing.status == "completed":
                     action = "replay"
@@ -136,6 +146,7 @@ class SimulatedStore:
             latest is None
             or latest.ordinal != admission.ordinal
             or latest.prefix_hash != admission.prefix_hash
+            or latest.response_message_id != admission.response_message_id
             or latest.status not in allowed
         ):
             raise VoiceContextError("voice_turn_obsolete", 409, metadata=admission.metadata)
@@ -159,10 +170,12 @@ class SimulatedStore:
                 async with self.lock:
                     await self._binding(admission.binding)
                     latest = self.receipts[max(self.receipts)]
-                    if latest.ordinal != admission.ordinal or latest.status in {
-                        "superseded",
-                        "interrupted",
-                    }:
+                    if (
+                        latest.ordinal != admission.ordinal
+                        or latest.prefix_hash != admission.prefix_hash
+                        or latest.response_message_id != admission.response_message_id
+                        or latest.status in {"superseded", "interrupted"}
+                    ):
                         return replace(admission, action="obsolete")
                     if latest.status == "completed":
                         return replace(admission, action="replay")
@@ -173,7 +186,12 @@ class SimulatedStore:
         async with self.lock:
             await self._binding(admission.binding)
             latest = self.receipts[max(self.receipts)]
-            if latest.ordinal != admission.ordinal or latest.status != "running":
+            if (
+                latest.ordinal != admission.ordinal
+                or latest.prefix_hash != admission.prefix_hash
+                or latest.response_message_id != admission.response_message_id
+                or latest.status != "running"
+            ):
                 return False
             latest.status = status
             return True
@@ -374,12 +392,11 @@ async def test_switch_back_to_spanish_and_neutral_words_preserve_language(rig):
     assert "language_detection" in switched.text
     assert '\\"language\\": \\"es\\"' in switched.text
     request["messages"][-1]["content"] = "OK"
-    # Neutral no pide otro idioma; modificar una utterance ya reservada no
-    # permite eludir la validación de prefijo, aunque todavía fuera control.
+    # Neutral conserva el idioma anterior. La última utterance aún provisional
+    # puede enmendarse sin cambiar el prefijo de turnos anteriores.
     neutral = await post(rig, request)
-    assert neutral.status_code == 409
-    assert neutral.json()["detail"] == "voice_turn_conflict"
-    assert "language_detection" not in neutral.text
+    assert neutral.status_code == 200 and "language_detection" not in neutral.text
+    assert neutral.text.endswith("data: [DONE]\n\n")
 
 
 async def test_only_language_tool_result_can_complete_a_provider_function_roundtrip(rig):
@@ -759,7 +776,10 @@ async def test_cancellation_before_generation_marks_only_admitted_run_interrupte
         await asyncio.gather(pending, return_exceptions=True)
 
 
-async def test_split_audio_supersedes_control_roundtrip_runner_with_same_counter(rig):
+@pytest.mark.parametrize("asr_amendment", [False, True])
+async def test_split_audio_supersedes_control_roundtrip_runner_with_same_counter(
+    rig, asr_amendment
+):
     entered, cancelled = asyncio.Event(), asyncio.Event()
     reads = 0
 
@@ -802,24 +822,36 @@ async def test_split_audio_supersedes_control_roundtrip_runner_with_same_counter
     first = asyncio.create_task(post(rig, request))
     try:
         await asyncio.wait_for(entered.wait(), 3)
-        followup = {
-            **request,
-            "messages": [*request["messages"], {"role": "user", "content": second_text}],
-        }
+        followup = (
+            body(first_text + " " + second_text, tools=LANGUAGE_TOOLS)
+            if asr_amendment
+            else {
+                **request,
+                "messages": [*request["messages"], {"role": "user", "content": second_text}],
+            }
+        )
+        if asr_amendment:
+            # El SDK ya cambió de idioma: conserva el retorno nativo actual.
+            followup["messages"].extend(request["messages"][1:])
         result = await asyncio.wait_for(post(rig, followup), 4)
         old = await asyncio.wait_for(first, 3)
         assert result.status_code == old.status_code == 200
         assert "Respuesta uno" in result.text and "Respuesta" not in old.text
         assert "error" not in old.text and old.text.endswith("data: [DONE]\n\n")
         assert cancelled.is_set() and len(rig.model.prompts) == 1
-        assert rig.store.receipts[1].status == "superseded"
-        assert rig.store.receipts[2].status == "completed"
-        assert [r.provider_turn for r in rig.store.receipts.values()] == [1, 1]
+        if asr_amendment:
+            assert len(rig.store.receipts) == 1 and rig.store.receipts[1].status == "completed"
+        else:
+            assert rig.store.receipts[1].status == "superseded"
+            assert rig.store.receipts[2].status == "completed"
+            assert [r.provider_turn for r in rig.store.receipts.values()] == [1, 1]
         routed = rig.resolver.call_args.kwargs["text"]
         assert first_text in routed and second_text in routed
         state = await rig.graph.aget_state({"configurable": {"thread_id": "owner::shared"}})
         users = [m.content for m in state.values["messages"] if m.type == "human"]
-        assert users == [first_text, second_text]  # Nada de Human compuesto duplicado.
+        assert users == (
+            [first_text + " " + second_text] if asr_amendment else [first_text, second_text]
+        )
         assert (await post(rig, followup)).status_code == 200 and len(rig.model.prompts) == 1
     finally:
         first.cancel()

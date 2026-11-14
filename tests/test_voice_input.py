@@ -1,6 +1,6 @@
 """Fragmentos de voz: contexto completo y presentación sin duplicar al usuario."""
 
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.checkpoint.memory import MemorySaver
 
 from app.api.routes.vita_voice import ProviderMessage, history_identity
@@ -54,3 +54,47 @@ async def test_graph_reads_complete_question_but_persists_only_current_fragment(
     )
     assert state["input"] == combined
     assert state["messages"][0].content == "Please answer briefly."
+
+
+async def test_asr_amendment_replaces_only_its_provisional_turn_and_evidence():
+    model = RecordingFakeModel(responses=[AIMessage(content="final answer")])
+    graph = build_graph(model=model, checkpointer=MemorySaver())
+    config = {
+        "configurable": {
+            "thread_id": "owner::amendment",
+            "message_channel": "voice",
+            "user_message_id": "current-user",
+            "assistant_message_id": "current-bot",
+            "voice_user_text": "What is my lunch today? Please answer briefly.",
+        }
+    }
+    await graph.aupdate_state(
+        config,
+        {
+            "messages": [
+                HumanMessage(id="prior-user", content="Prior complete question"),
+                AIMessage(id="prior-bot", content="Prior complete answer"),
+                HumanMessage(id="current-user", content="What is my lunch"),
+                AIMessage(
+                    id="draft-call",
+                    content="",
+                    tool_calls=[{"name": "draft_read", "args": {}, "id": "draft-tool"}],
+                ),
+                ToolMessage(
+                    id="draft-result", content="STALE_DRAFT_EVIDENCE", tool_call_id="draft-tool"
+                ),
+                AIMessage(id="current-bot", content="UNHEARD_DRAFT_ANSWER"),
+            ]
+        },
+    )
+    state = await graph.ainvoke({"input": config["configurable"]["voice_user_text"]}, config=config)
+    assert [(m.id, m.content) for m in state["messages"]] == [
+        ("prior-user", "Prior complete question"),
+        ("prior-bot", "Prior complete answer"),
+        ("current-user", config["configurable"]["voice_user_text"]),
+        ("current-bot", "final answer"),
+    ]
+    assert state["turn_start_index"] == 2
+    prompt = " ".join(str(m.content) for m in model.prompts[0])
+    assert "STALE_DRAFT_EVIDENCE" not in prompt and "UNHEARD_DRAFT_ANSWER" not in prompt
+    assert "Prior complete answer" in prompt

@@ -41,6 +41,29 @@ def guardrails_node(state: AgentState) -> dict:
     """
     result = check_input_guardrails(state.get("input", ""))
     configurable = get_config().get("configurable", {})
+    prior_messages = list(state.get("messages", []))
+    amended_at = None
+    if configurable.get("message_channel") == "voice" and configurable.get("user_message_id"):
+        amended_at = next(
+            (
+                index
+                for index, message in enumerate(prior_messages)
+                if isinstance(message, HumanMessage)
+                and message.id == configurable["user_message_id"]
+            ),
+            None,
+        )
+
+    def turn_messages(messages):
+        # El mismo ID solo vuelve a ejecutarse tras una enmienda ASR admitida.
+        # Sustituye su borrador completo, incluidas tools y respuesta provisional;
+        # no deja evidencia antigua en el prompt ni duplica el Human visible.
+        return (
+            Overwrite([*prior_messages[:amended_at], *messages])
+            if amended_at is not None
+            else messages
+        )
+
     visible_input = result.sanitized
     if configurable.get("message_channel") == "voice" and isinstance(
         configurable.get("voice_user_text"), str
@@ -62,7 +85,7 @@ def guardrails_node(state: AgentState) -> dict:
         "tools_used": Overwrite([]),
         "suggestions": Overwrite([]),
         "rag_sources": [],
-        "turn_start_index": len(state.get("messages", [])),
+        "turn_start_index": amended_at if amended_at is not None else len(prior_messages),
         "tool_call_count": 0,
         "tool_budget_exhausted": False,
         "app_actions": Overwrite([]),
@@ -80,36 +103,40 @@ def guardrails_node(state: AgentState) -> dict:
                 "reason": result.reason,
                 "pattern": result.pattern,
             },
-            "messages": [
-                AIMessage(
-                    content=result.reason or "Mensaje bloqueado por los guardrails.",
-                    id=configurable.get("assistant_message_id"),
-                    additional_kwargs={
-                        **message_metadata,
-                        "execution_id": configurable.get("execution_id"),
-                    },
-                )
-            ],
+            "messages": turn_messages(
+                [
+                    AIMessage(
+                        content=result.reason or "Mensaje bloqueado por los guardrails.",
+                        id=configurable.get("assistant_message_id"),
+                        additional_kwargs={
+                            **message_metadata,
+                            "execution_id": configurable.get("execution_id"),
+                        },
+                    )
+                ]
+            ),
         }
 
     return {
         **turn_state,
         "input": result.sanitized,
         # Una sola entrada por turno: el ciclo agent/tools reutiliza el historial.
-        "messages": [
-            HumanMessage(
-                content=visible_input,
-                id=configurable.get("user_message_id"),
-                additional_kwargs={
-                    **message_metadata,
-                    "status": (
-                        "provider_input"
-                        if configurable.get("message_channel") == "voice"
-                        else "final"
-                    ),
-                },
-            )
-        ],
+        "messages": turn_messages(
+            [
+                HumanMessage(
+                    content=visible_input,
+                    id=configurable.get("user_message_id"),
+                    additional_kwargs={
+                        **message_metadata,
+                        "status": (
+                            "provider_input"
+                            if configurable.get("message_channel") == "voice"
+                            else "final"
+                        ),
+                    },
+                )
+            ]
+        ),
         "guardrail": {"safe": True, "pattern": None, "sanitized": result.sanitized},
     }
 
@@ -239,8 +266,6 @@ def make_agent_node(
         # state) para que nunca persista en el checkpointer entre turnos: un
         # turno sin contexto no debe heredar la guía del turno anterior.
         configurable = get_config().get("configurable", {})
-        if configurable.get("message_channel") == "voice":
-            system_blocks.append(VOICE_DELIVERY_POLICY)
         control_context = configurable.get("control_context")
         if control_context:
             system_blocks.append(
@@ -267,6 +292,11 @@ def make_agent_node(
                     allow_appointment=False,
                 )
             )
+
+        if configurable.get("message_channel") == "voice":
+            # La entrega oral cierra las políticas de sistema; los datos del
+            # perfil/documentos no convierten un resumen en una lectura completa.
+            system_blocks.append(VOICE_DELIVERY_POLICY)
 
         prompt = [
             *[SystemMessage(content=block) for block in system_blocks],

@@ -16,8 +16,15 @@ contiene dos usuarios y `system__agent_turns=1`. No acredita por sí solo los
 contadores de cada callback ni una reescritura del prefijo. No se descartan mensajes
 por ausencia de medium, por su longitud ni por contener una instrucción breve.
 
-Esta implementación admite contadores repetidos como metadatos y conserva el
-prefijo canónico exacto. No intenta reparar un prefijo alterado ni inventa contadores.
+Una prueba real posterior sobre `19e2174`/AI60 exportó ambas frases como un único
+`user` de 71 caracteres y rechazó callbacks con `voice_turn_conflict`,
+`previous_hash_matches=True` y `counter_reused=True` mientras la generación seguía
+en curso. El proveedor también enmienda la última utterance provisional con el
+mismo ordinal; no basta con admitir dos ordinales que comparten contador.
+
+Esta implementación admite contadores repetidos como metadatos y mantiene exacto
+el prefijo de las utterances anteriores. Solo la última fila provisional puede
+adoptar un nuevo hash según la regla de enmienda inferior. No inventa contadores.
 Root conserva su `composed_input` para routing/prefetch y el Human visible original
 del último segmento; este carril no modifica route, language, runtime ni nodos.
 
@@ -49,7 +56,8 @@ caracteres. El primer `previous` debe ser SHA256 de `[]`, igual a `history_ident
 
 La fila de sesión `FOR UPDATE` serializa admisión, revocación y fencing. La PK
 `(session_id, ordinal)` y la comparación de prefijo exacto siguen siendo autoridad.
-En duplicados se valida también el prefijo de la fila anterior. Acciones:
+En duplicados y enmiendas se valida también el prefijo exacto de la fila anterior.
+Acciones:
 
 | action | Significado y responsabilidad de root |
 | --- | --- |
@@ -70,6 +78,37 @@ supersede nada. Recibos `completed` anteriores tampoco se reproducen cuando ya h
 un ordinal posterior. Un recibo interrumpido nunca se reclama de nuevo para generar;
 la utterance siguiente válida sí puede continuar. Frases repetidas en ordinales
 distintos siguen siendo distintas, sin deduplicación por igualdad de texto.
+
+### Enmienda de la última utterance en curso
+
+Un hash distinto para el mismo ordinal solo se admite si la fila es la última,
+su estado es `running` o `control` y `previous_hash` coincide exactamente con el
+hash canónico de la fila anterior (o SHA256 de `[]` para ordinal 1). Bajo el mismo
+lock SQL de sesión se sustituye únicamente `prefix_hash` y se establece
+`running/run` o `control/control` según la fase nueva. `provider_turn` y ordinal
+permanecen intactos. Cada enmienda recibe un nuevo ID de respuesta con UUID, usado
+como generación durable además del hash. Un duplicado del nuevo hash espera/reproduce
+normalmente, sin reclamar otra generación.
+
+Las admisiones del hash viejo pasan a obsoletas: `check_current`, el waiter y el
+fencing de `aput/aput_writes` comparan hash e ID de generación con la fila vigente. Su
+`finish_admission` devuelve `False`, sin marcar interrumpido/completado al sucesor.
+Así una revisión A→B→A no vuelve a habilitar al primer runner A. El ID Human sigue
+estable por utterance. Las filas `completed`, `interrupted`
+o anteriores a la última no admiten cambio de hash (409), aunque el prefijo previo
+coincida. Cambiar una utterance anterior también sigue rechazándose con 409.
+
+Root aplica la revisión a guardrails y reemplaza el sufijo provisional del mismo
+ID Human, incluidas sus tools y AI, antes de generar. Este store no cambia
+la ruta, los nodos ni el contenido de mensajes. No hay una nueva migración: se
+reutiliza la fila y el fencing existentes. La aceptación con audio real queda a
+cargo de root tras integrar esos hooks.
+
+Validación integrada posterior: **798 correctas**, 47 avisos heredados, sin
+omisiones, contra PostgreSQL exclusivo descartable; Ruff correcto. Incluye ASR
+actualizado con un ordinal, Human único y eliminación de evidencia provisional,
+cancelación, replay, aislamiento y la regresión A→B→A. Los documentos y datos de
+pacientes no se usaron en estas pruebas locales.
 
 `VoiceContextError.metadata` y `TurnAdmission.metadata` solo contienen
 `previous_hash_matches` y `counter_reused`, booleanos calculados en admisión. Root
