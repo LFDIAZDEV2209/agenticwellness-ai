@@ -382,9 +382,16 @@ async def test_supersession_cancels_llm_new_run_waits_thread_and_saver_blocks_ol
     try:
         await asyncio.wait_for(model.entered.wait(), 3)
         # El nodo puede entrar antes de que el saver asíncrono haya terminado
-        # su primer checkpoint; esperar ese artefacto evita una carrera del test.
+        # el checkpoint con Human; un checkpoint inicial vacío no acredita esa
+        # escritura. Esperar el mensaje hace determinista la aserción de retención.
         async with asyncio.timeout(3):
-            while (before := await rig.saver.aget_tuple(cfg1)) is None:
+            while True:
+                before = await rig.saver.aget_tuple(cfg1)
+                if before and any(
+                    m.type == "human" and m.content == "fixture one"
+                    for m in before.checkpoint.get("channel_values", {}).get("messages", [])
+                ):
+                    break
                 await asyncio.sleep(0.01)
         second_inputs = ("fixture one amended",) if amend else ("fixture one", "fixture two")
         second = await admit(owner, *second_inputs)
