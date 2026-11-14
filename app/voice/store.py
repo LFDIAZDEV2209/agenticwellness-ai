@@ -1,6 +1,11 @@
 """Sesiones y recibos durables: ninguna garantía depende del proceso que atiende."""
 
+import asyncio
+import hashlib
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from typing import Literal
 
 from sqlalchemy import (
     Boolean,
@@ -9,7 +14,6 @@ from sqlalchemy import (
     Index,
     Integer,
     String,
-    UniqueConstraint,
     func,
     or_,
     select,
@@ -53,10 +57,7 @@ class VitaVoiceSession(Base):
 
 class VitaVoiceTurn(Base):
     __tablename__ = "vita_voice_turns"
-    __table_args__ = (
-        UniqueConstraint("session_id", "provider_turn"),
-        {"schema": "ai"},
-    )
+    __table_args__ = ({"schema": "ai"},)
 
     session_id: Mapped[str] = mapped_column(
         String(36),
@@ -73,12 +74,217 @@ class VitaVoiceTurn(Base):
 class VoiceContextError(Exception):
     """Error público acotado, nunca contiene contexto/token/historial."""
 
-    def __init__(self, code: str, status: int = 403):
+    def __init__(self, code: str, status: int = 403, *, metadata: dict | None = None):
         super().__init__(code)
         self.status = status
+        # Solo flags calculados por el servidor, nunca hashes/texto/IDs.
+        self.metadata = metadata or {}
+
+
+@dataclass(frozen=True)
+class VoiceBinding:
+    """Identidad resuelta del registro tras verificar HMAC, nunca del body."""
+
+    session_id: str
+    user_id: str
+    thread_id: str
+    conversation_id: str
+
+
+@dataclass(frozen=True)
+class TurnAdmission:
+    action: Literal["run", "replay", "wait", "obsolete", "control"]
+    binding: VoiceBinding
+    ordinal: int
+    prefix_hash: str
+    response_message_id: str
+    previous_hash_matches: bool
+    counter_reused: bool
+
+    @property
+    def metadata(self) -> dict[str, bool]:
+        return {
+            "previous_hash_matches": self.previous_hash_matches,
+            "counter_reused": self.counter_reused,
+        }
 
 
 class VoiceStore:
+    async def _binding_locked(self, session, binding: VoiceBinding):
+        record = await session.get(VitaVoiceSession, binding.session_id, with_for_update=True)
+        if record is None or record.revoked or record.expires_at <= datetime.now(UTC):
+            raise VoiceContextError("voice_session_inactive")
+        if (record.user_id, record.thread_id, record.conversation_id) != (
+            binding.user_id,
+            binding.thread_id,
+            binding.conversation_id,
+        ):
+            raise VoiceContextError("voice_context_binding")
+        return record
+
+    async def _latest(self, session, session_id: str):
+        return (
+            await session.execute(
+                select(VitaVoiceTurn)
+                .where(VitaVoiceTurn.session_id == session_id)
+                .order_by(VitaVoiceTurn.ordinal.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+
+    async def admit_turn(
+        self,
+        binding: VoiceBinding,
+        ordinal: int,
+        provider_turn: int,
+        prefix_hash: str,
+        previous_hash: str,
+        *,
+        phase: Literal["utterance", "control"] = "utterance",
+    ) -> TurnAdmission:
+        """Una decisión durable; el contador externo solo es metadato.
+
+        La fila de sesión serializa admisión, supersesión y fencing de escrituras.
+        Nunca se espera un LLM ni un advisory lock dentro de esta transacción.
+        El llamador entrega el ordinal/prefijo CANÓNICOS y una fase validada.
+        """
+        if (
+            phase not in {"utterance", "control"}
+            or type(ordinal) is not int
+            or ordinal < 1
+            or type(provider_turn) is not int
+            or provider_turn < 0
+        ):
+            raise VoiceContextError("voice_turn_invalid", 422)
+        for digest in (prefix_hash, previous_hash):
+            if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+                raise VoiceContextError("voice_hash_invalid", 422)
+        async with async_session() as session:
+            await self._binding_locked(session, binding)
+            latest = await self._latest(session, binding.session_id)
+            existing = await session.get(VitaVoiceTurn, (binding.session_id, ordinal))
+            prior = (
+                await session.get(VitaVoiceTurn, (binding.session_id, ordinal - 1))
+                if existing and ordinal > 1
+                else latest
+                if not existing
+                else None
+            )
+            expected = prior.prefix_hash if prior else hashlib.sha256(b"[]").hexdigest()
+            flags = {
+                "previous_hash_matches": previous_hash == expected,
+                "counter_reused": latest is not None and provider_turn == latest.provider_turn,
+            }
+            if existing:
+                if existing.prefix_hash != prefix_hash or not flags["previous_hash_matches"]:
+                    raise VoiceContextError("voice_turn_conflict", 409, metadata=flags)
+                if latest.ordinal != ordinal or existing.status in {"superseded", "interrupted"}:
+                    action = "obsolete"
+                elif existing.status == "completed":
+                    action = "replay"
+                elif existing.status == "running":
+                    action = "wait" if phase == "utterance" else "obsolete"
+                elif existing.status == "control" and phase == "control":
+                    action = "control"
+                elif existing.status == "control":
+                    existing.status = "running"
+                    action = "run"
+                else:
+                    raise VoiceContextError("voice_turn_invalid_state", 409, metadata=flags)
+                turn = existing
+            else:
+                if ordinal != (latest.ordinal + 1 if latest else 1):
+                    raise VoiceContextError("voice_history_sequence", 409, metadata=flags)
+                if not flags["previous_hash_matches"]:
+                    raise VoiceContextError("voice_history_changed", 409, metadata=flags)
+                if latest and latest.status in {"control", "running"}:
+                    latest.status = "superseded"
+                turn = VitaVoiceTurn(
+                    session_id=binding.session_id,
+                    ordinal=ordinal,
+                    provider_turn=provider_turn,
+                    prefix_hash=prefix_hash,
+                    status="control" if phase == "control" else "running",
+                    response_message_id=f"voice:{binding.session_id}:{ordinal}:bot",
+                )
+                session.add(turn)
+                action = "control" if phase == "control" else "run"
+            await session.commit()
+            return TurnAdmission(
+                action, binding, ordinal, prefix_hash, turn.response_message_id, **flags
+            )
+
+    async def _current_locked(self, session, admission: TurnAdmission, *, completed_ok=False):
+        await self._binding_locked(session, admission.binding)
+        latest = await self._latest(session, admission.binding.session_id)
+        allowed = {"running", "completed"} if completed_ok else {"running"}
+        if admission.action == "control":
+            allowed = {"control"}
+        if (
+            latest is None
+            or latest.ordinal != admission.ordinal
+            or latest.prefix_hash != admission.prefix_hash
+            or latest.status not in allowed
+        ):
+            raise VoiceContextError("voice_turn_obsolete", 409, metadata=admission.metadata)
+        return latest
+
+    async def check_current(self, admission: TurnAdmission, *, completed_ok=False) -> None:
+        async with async_session() as session:
+            await self._current_locked(session, admission, completed_ok=completed_ok)
+
+    @asynccontextmanager
+    async def write_fence(self, admission: TurnAdmission):
+        """Linealiza cada escritura del saver con admisiones/revocaciones.
+
+        Solo cubre IO corto de persistencia; nunca espera generación ni tokens.
+        Una admisión posterior no puede confirmar mientras esta escritura sigue.
+        """
+        if admission.action != "run":
+            raise VoiceContextError("voice_run_claim_required", 409)
+        async with async_session() as session:
+            await self._current_locked(session, admission)
+            yield
+
+    async def finish_admission(
+        self, admission: TurnAdmission, status: Literal["completed", "interrupted"]
+    ) -> bool:
+        if admission.action != "run" or status not in {"completed", "interrupted"}:
+            raise VoiceContextError("voice_run_claim_required", 409)
+        async with async_session() as session:
+            await self._binding_locked(session, admission.binding)
+            turn = await self._latest(session, admission.binding.session_id)
+            if (
+                turn is None
+                or turn.ordinal != admission.ordinal
+                or turn.prefix_hash != admission.prefix_hash
+                or turn.status != "running"
+            ):
+                return False  # La limpieza vieja no pisa un turno nuevo/supersedido.
+            turn.status = status
+            await session.commit()
+            return True
+
+    async def wait_for_turn(self, admission: TurnAdmission, *, timeout=20.0, interval=0.05):
+        """Observa sin retener transacción/conexión entre polls; nunca reclama run."""
+        if admission.action != "wait":
+            raise VoiceContextError("voice_wait_claim_required", 409)
+        async with asyncio.timeout(timeout):
+            while True:
+                async with async_session() as session:
+                    await self._binding_locked(session, admission.binding)
+                    latest = await self._latest(session, admission.binding.session_id)
+                    if (
+                        latest is None
+                        or latest.ordinal != admission.ordinal
+                        or latest.prefix_hash != admission.prefix_hash
+                        or latest.status in {"superseded", "interrupted"}
+                    ):
+                        return replace(admission, action="obsolete")
+                    if latest.status == "completed":
+                        return replace(admission, action="replay")
+                await asyncio.sleep(interval)
+
     async def create(self, record: VitaVoiceSession) -> None:
         async with async_session() as session:
             session.add(record)

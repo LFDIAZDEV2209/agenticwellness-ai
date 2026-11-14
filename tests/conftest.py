@@ -45,6 +45,7 @@ def pytest_asyncio_loop_factories(item):
     if sys.platform == "win32" and item.path.name in {
         "test_vita_postgres.py",
         "test_vita_history_postgres.py",
+        "test_voice_native_turns_postgres.py",
     }:
         return {"vita_psycopg_selector": asyncio.SelectorEventLoop}
     # Si el hook está registrado, pytest-asyncio 1.4 exige mapping también
