@@ -376,3 +376,43 @@ coincide con el evento WebSocket, recibió audio y dos respuestas. Se eliminó e
 conversación. Una muestra: firma 1628 ms, primer texto 525 ms y primer audio 670 ms
 desde apertura de WebSocket; no representan latencia de micrófono/playback en iPhone
 ni percentiles. Configuración compartida del agente sin modificaciones.
+
+
+## Continuaciones nativas y bilingüismo (14-11-2026)
+
+La conexión ya establecida presentó otro bloqueo: el proveedor puede dividir una
+pregunta real en dos utterances mientras `system__agent_turns` permanece igual.
+Ese contador identifica turnos del agente, no utterances del paciente. La nueva
+admisión usa el ordinal de usuarios y el prefijo canónico exacto, con el contador
+externo como metadato. Un duplicado espera/reproduce; una continuación válida
+supersede y cancela el runner anterior. Un saver por admisión impide escrituras
+viejas después de la supersesión. Véase [contrato y rollback](vita-native-turns.md).
+
+El adaptador admite primero, prepara el historial bajo la misma guarda, ejecuta
+solo el propietario `run` y termina los streams obsoletos con SSE vacío válido.
+No convierte la supersesión esperada en error fatal de ElevenLabs. Los cambios
+nativos de idioma reservan `control` y vuelven a la misma utterance; no crean otro
+Human ni otra generación. La app declara su idioma inicial; se cambia únicamente
+si el idioma hablado lo requiere. Los flags de diagnóstico son booleanos y nunca
+registran voz, texto, firmas, hashes ni identidad del paciente.
+
+Para routing/RAG se componen las frases consecutivas sin respuesta hablada de por
+medio; el mensaje Human conserva el último segmento original. Se mantiene el
+prefijo de seguridad con los segmentos originales, sin repararlo ni recortarlo.
+La política de voz pide respuestas breves de 25 a 45 palabras, con máximo de 60
+para consultas breves. Esto es una instrucción del modelo, no un límite duro que
+pueda cortar contenido clínico.
+
+La migración `94e1c2b75a06` elimina solo UNIQUE(session_id, provider_turn), mantiene
+la PK ordinal y los recibos. El rollback funcional a voz legacy no requiere bajar
+el esquema; el SQL de downgrade se niega a borrar o deduplicar recibos existentes.
+OpenAPI y ambos SQL offline están en `docs/contracts/`.
+
+Validación local integrada: **781 correctas**, sin omisiones, 47 avisos heredados,
+con PostgreSQL exclusivo descartable; el último ajuste de casos HTTP se verificó
+en **70 correctas** de voz/historial, 6 avisos, con PostgreSQL real. Ruff, formato,
+exportación OpenAPI/SQL y `git diff --check` correctos. Los casos incluyen contador
+cero/repetido, dos segmentos reales QA, espera/replay con un solo LLM, cancelación
+de la tool, revocación durante espera y finalización sin excepciones sin recuperar.
+Esto acredita integración local; la aceptación de audio remoto se registra en
+el handoff de OpenSpec tras el despliegue.

@@ -5,9 +5,11 @@ integración aislada antes de activar el modo. No se accede a la BD compartida.
 """
 
 import asyncio
+import hashlib
 import json
 import time
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
@@ -26,9 +28,10 @@ from app.api.main import create_app
 from app.api.routes import vita_voice
 from app.core.config import get_settings
 from app.graph.graph import build_graph
+from app.vita.locking import ThreadBusyError
 from app.vita.runtime import ResolvedTurn
 from app.voice.context import AUDIENCE, sign_context, verify_context
-from app.voice.store import VoiceContextError
+from app.voice.store import TurnAdmission, VoiceContextError
 from tests.fakes import RecordingFakeModel
 from tests.test_api import FakeDbSession
 
@@ -54,36 +57,126 @@ class SimulatedStore:
             expires_at=datetime.fromtimestamp(int(time.time()) + 300, UTC),
         )
         self.receipts = {}
+        self.lock = asyncio.Lock()
+        self.wait_started = asyncio.Event()
 
     async def get(self, sid):
-        if sid != self.record.id or self.record.revoked:
+        if (
+            sid != self.record.id
+            or self.record.revoked
+            or self.record.expires_at <= datetime.now(UTC)
+        ):
             raise VoiceContextError("voice_session_inactive")
         return self.record
 
-    async def start_turn(self, sid, ordinal, provider_turn, prefix, previous):
-        await self.get(sid)
-        if ordinal in self.receipts:
-            turn = self.receipts[ordinal]
-            if turn.prefix_hash != prefix or turn.provider_turn != provider_turn:
-                raise VoiceContextError("voice_turn_conflict", 409)
-            if turn.status != "completed":
-                raise VoiceContextError("voice_turn_inflight_or_interrupted", 409)
-            return turn
-        latest = self.receipts.get(ordinal - 1)
-        if ordinal != len(self.receipts) + 1 or (latest and latest.prefix_hash != previous):
-            raise VoiceContextError("voice_history_sequence", 409)
-        turn = SimpleNamespace(
-            ordinal=ordinal,
-            provider_turn=provider_turn,
-            prefix_hash=prefix,
-            status="running",
-            response_message_id=f"voice:{sid}:{ordinal}:bot",
-        )
-        self.receipts[ordinal] = turn
-        return turn
+    async def _binding(self, binding):
+        record = await self.get(binding.session_id)
+        if (binding.user_id, binding.thread_id, binding.conversation_id) != (
+            record.user_id,
+            record.thread_id,
+            record.conversation_id,
+        ):
+            raise VoiceContextError("voice_context_binding")
 
-    async def finish_turn(self, sid, ordinal, status):
-        self.receipts[ordinal].status = status
+    async def admit_turn(
+        self, binding, ordinal, provider_turn, prefix, previous, *, phase="utterance"
+    ):
+        async with self.lock:
+            await self._binding(binding)
+            latest = self.receipts[max(self.receipts)] if self.receipts else None
+            existing = self.receipts.get(ordinal)
+            prior = self.receipts.get(ordinal - 1) if existing else latest
+            flags = {
+                "previous_hash_matches": previous
+                == (prior.prefix_hash if prior else hashlib.sha256(b"[]").hexdigest()),
+                "counter_reused": latest is not None and latest.provider_turn == provider_turn,
+            }
+            if existing:
+                if existing.prefix_hash != prefix or not flags["previous_hash_matches"]:
+                    raise VoiceContextError("voice_turn_conflict", 409, metadata=flags)
+                if latest.ordinal != ordinal or existing.status in {"interrupted", "superseded"}:
+                    action = "obsolete"
+                elif existing.status == "completed":
+                    action = "replay"
+                elif existing.status == "running":
+                    action = "wait" if phase == "utterance" else "obsolete"
+                elif phase == "control":
+                    action = "control"
+                else:
+                    existing.status = "running"
+                    action = "run"
+                turn = existing
+            else:
+                if ordinal != (latest.ordinal + 1 if latest else 1):
+                    raise VoiceContextError("voice_history_sequence", 409, metadata=flags)
+                if not flags["previous_hash_matches"]:
+                    raise VoiceContextError("voice_history_changed", 409, metadata=flags)
+                if latest and latest.status in {"control", "running"}:
+                    latest.status = "superseded"
+                turn = SimpleNamespace(
+                    ordinal=ordinal,
+                    provider_turn=provider_turn,
+                    prefix_hash=prefix,
+                    status="control" if phase == "control" else "running",
+                    response_message_id=f"voice:{binding.session_id}:{ordinal}:bot",
+                )
+                self.receipts[ordinal] = turn
+                action = "control" if phase == "control" else "run"
+            return TurnAdmission(
+                action, binding, ordinal, prefix, turn.response_message_id, **flags
+            )
+
+    async def _current(self, admission, *, completed_ok=False):
+        await self._binding(admission.binding)
+        latest = self.receipts[max(self.receipts)] if self.receipts else None
+        allowed = {"running", "completed"} if completed_ok else {"running"}
+        if admission.action == "control":
+            allowed = {"control"}
+        if (
+            latest is None
+            or latest.ordinal != admission.ordinal
+            or latest.prefix_hash != admission.prefix_hash
+            or latest.status not in allowed
+        ):
+            raise VoiceContextError("voice_turn_obsolete", 409, metadata=admission.metadata)
+
+    async def check_current(self, admission, *, completed_ok=False):
+        async with self.lock:
+            await self._current(admission, completed_ok=completed_ok)
+
+    @asynccontextmanager
+    async def write_fence(self, admission):
+        assert admission.action == "run"
+        async with self.lock:
+            await self._current(admission)
+            yield
+
+    async def wait_for_turn(self, admission, *, timeout=20, interval=0.001):
+        assert admission.action == "wait"
+        self.wait_started.set()
+        async with asyncio.timeout(timeout):
+            while True:
+                async with self.lock:
+                    await self._binding(admission.binding)
+                    latest = self.receipts[max(self.receipts)]
+                    if latest.ordinal != admission.ordinal or latest.status in {
+                        "superseded",
+                        "interrupted",
+                    }:
+                        return replace(admission, action="obsolete")
+                    if latest.status == "completed":
+                        return replace(admission, action="replay")
+                await asyncio.sleep(interval)
+
+    async def finish_admission(self, admission, status):
+        assert admission.action == "run"
+        async with self.lock:
+            await self._binding(admission.binding)
+            latest = self.receipts[max(self.receipts)]
+            if latest.ordinal != admission.ordinal or latest.status != "running":
+                return False
+            latest.status = status
+            return True
 
     async def revoke(self, sid, user_id):
         if sid != self.record.id or user_id != self.record.user_id:
@@ -108,15 +201,24 @@ def rig(monkeypatch):
     monkeypatch.setattr("app.api.routes.voice.voice_store", store)
     monkeypatch.setattr(vita_voice, "read_catalog", AsyncMock(return_value=[]))
     history = SimpleNamespace(
-        prepare_turn=AsyncMock(), before_turn_locked=AsyncMock(), ensure_locked=AsyncMock()
+        before_turn_locked=AsyncMock(),
+        activity_locked=AsyncMock(),
+        ensure_locked=AsyncMock(return_value=SimpleNamespace(history_revision=0)),
     )
     monkeypatch.setattr(vita_voice, "history_service", history)
+    monkeypatch.setattr("app.history.service.history_service", history)
+
+    thread_lock = asyncio.Lock()
 
     @asynccontextmanager
-    async def unlocked(_):
-        yield
+    async def guarded(_):
+        if thread_lock.locked():
+            raise ThreadBusyError("vita_thread_busy")
+        async with thread_lock:
+            yield
 
-    monkeypatch.setattr(vita_voice, "thread_guard", unlocked)
+    monkeypatch.setattr(vita_voice, "thread_guard", guarded)
+    monkeypatch.setattr("app.voice.turns.thread_guard", guarded)
     model = RecordingFakeModel(
         responses=[
             AIMessage(content="Respuesta uno"),
@@ -187,14 +289,14 @@ async def test_language_switch_cannot_emit_after_concurrent_revocation(rig):
 
     rig.monkeypatch.setattr(vita_voice, "read_catalog", revoked_during_catalog)
     response = await post(rig, body("What is my assigned lunch?", tools=LANGUAGE_TOOLS))
-    assert response.status_code == 200
-    assert "voice_turn_interrupted" in response.text and "language_detection" not in response.text
+    assert response.status_code == 403
+    assert "language_detection" not in response.text
     assert not rig.store.receipts
     rig.resolver.assert_not_awaited()
 
 
 async def test_history_cleanup_rejects_voice_before_generation(rig):
-    rig.history.prepare_turn.side_effect = VoiceContextError("history_revision_changed", 409)
+    rig.history.ensure_locked.side_effect = VoiceContextError("history_revision_changed", 409)
     result = await post(rig)
     assert result.status_code == 409
     rig.resolver.assert_not_awaited()
@@ -222,8 +324,16 @@ async def test_native_language_tool_roundtrip_is_not_another_patient_turn(rig):
     assert call["function"]["name"] == "language_detection"
     assert json.loads(call["function"]["arguments"])["language"] == "en"
     assert chunks[1]["choices"][0]["finish_reason"] == "tool_calls"
-    assert not rig.store.receipts
+    assert len(rig.store.receipts) == 1 and rig.store.receipts[1].status == "control"
+    assert rig.model.prompts == []
     rig.resolver.assert_not_awaited()
+    repeated_control = await post(rig, request)
+    repeated_call = next(
+        json.loads(line[6:])["choices"][0]["delta"]["tool_calls"][0]
+        for line in repeated_control.text.splitlines()
+        if '"tool_calls"' in line and '"delta"' in line
+    )
+    assert repeated_call["id"] == call["id"] and len(rig.store.receipts) == 1
     request["messages"].extend(
         [
             {"role": "assistant", "content": None, "tool_calls": [call]},
@@ -236,9 +346,13 @@ async def test_native_language_tool_roundtrip_is_not_another_patient_turn(rig):
     assert len(rig.store.receipts) == 1
     assert rig.resolver.call_args.kwargs["text"] == "What does my nutrition plan include?"
     assert len(rig.model.prompts) == 1
+    assert (await post(rig, request)).status_code == 200
+    assert rig.store.receipts[1].status == "completed" and len(rig.model.prompts) == 1
 
 
 async def test_switch_back_to_spanish_and_neutral_words_preserve_language(rig):
+    first = await post(rig, body("What can you help me with?"))
+    assert first.status_code == 200
     en_call = {
         "id": "en-call",
         "type": "function",
@@ -260,10 +374,11 @@ async def test_switch_back_to_spanish_and_neutral_words_preserve_language(rig):
     assert "language_detection" in switched.text
     assert '\\"language\\": \\"es\\"' in switched.text
     request["messages"][-1]["content"] = "OK"
-    # Neutral no cambia el idioma; el ordinal artificial no tiene recibo previo.
-    # El rechazo de secuencia acredita que llegó al store y no emitió otra tool.
+    # Neutral no pide otro idioma; modificar una utterance ya reservada no
+    # permite eludir la validación de prefijo, aunque todavía fuera control.
     neutral = await post(rig, request)
     assert neutral.status_code == 409
+    assert neutral.json()["detail"] == "voice_turn_conflict"
     assert "language_detection" not in neutral.text
 
 
@@ -333,15 +448,17 @@ async def test_missing_headers_never_generate(rig, header):
     rig.resolver.assert_not_awaited()
 
 
-async def test_replay_does_not_regenerate_and_equal_phrases_at_different_ordinals_are_distinct(rig):
-    first = await post(rig, body("La misma frase"))
-    replay = await post(rig, body("La misma frase"))
+@pytest.mark.parametrize("counter", [0, 1])
+async def test_replay_does_not_regenerate_and_equal_phrases_at_different_ordinals_are_distinct(
+    rig, counter
+):
+    headers = {**rig.headers, "X-Vita-Turn": str(counter)}
+    first = await post(rig, body("La misma frase"), headers=headers)
+    replay = await post(rig, body("La misma frase"), headers=headers)
     assert first.status_code == replay.status_code == 200
     assert "Respuesta uno" in first.text and "Respuesta uno" in replay.text
     assert len(rig.model.prompts) == 1
-    second = await post(
-        rig, body("La misma frase", "La misma frase"), headers={**rig.headers, "X-Vita-Turn": "2"}
-    )
+    second = await post(rig, body("La misma frase", "La misma frase"), headers=headers)
     assert second.status_code == 200 and "Respuesta dos" in second.text
     assert len(rig.model.prompts) == 2
     snapshot = await rig.graph.aget_state({"configurable": {"thread_id": "owner::shared"}})
@@ -516,7 +633,7 @@ async def test_vita_session_emits_only_reduced_context_and_bound_thread(rig):
     assert len(upstream.call_args.args) == 3  # No JWT/identidad enviados al proveedor.
 
 
-async def test_revocation_during_http_asgi_generation_cancels_tool(rig):
+async def test_revocation_during_http_asgi_generation_cancels_tool(rig, caplog):
     started, cancelled = asyncio.Event(), asyncio.Event()
 
     @tool
@@ -540,7 +657,12 @@ async def test_revocation_during_http_asgi_generation_cancels_tool(rig):
     response = await asyncio.wait_for(task, 3)
     assert "voice_turn_interrupted" in response.text
     assert cancelled.is_set()
-    assert rig.store.receipts[1].status == "interrupted"
+    # La finalización también exige sesión activa: revocar no permite completar
+    # ni reclamar el recibo pendiente aunque la limpieza ya no pueda modificarlo.
+    assert rig.store.receipts[1].status != "completed"
+    assert (await post(rig, body("Consulta lenta"))).status_code == 403
+    await asyncio.sleep(0)
+    assert not any("Task exception was never retrieved" in r.getMessage() for r in caplog.records)
 
 
 class StreamingFinalModel(RecordingFakeModel):
@@ -563,6 +685,166 @@ class StreamingFinalModel(RecordingFakeModel):
         await self.release.wait()
         yield ChatGenerationChunk(message=AIMessageChunk(content="después"))
         self.generation_complete.set()
+
+
+@pytest.mark.parametrize("outcome", ["complete", "revoke"])
+async def test_inflight_http_duplicate_waits_and_replays_without_another_llm(rig, outcome):
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    @tool
+    async def hold() -> str:
+        """Lectura controlada para observar un duplicado durante ejecución."""
+        entered.set()
+        await release.wait()
+        return "fixture read"
+
+    graph = build_graph(
+        model=rig.model, tools=[hold], prepare_tools=["hold"], checkpointer=rig.graph.checkpointer
+    )
+    rig.resolver.side_effect = None
+    rig.resolver.return_value = ResolvedTurn(graph, "base", None, "fake", "fake", 25, "fixture")
+    first = asyncio.create_task(post(rig))
+    duplicate = None
+    try:
+        await asyncio.wait_for(entered.wait(), 3)
+        duplicate = asyncio.create_task(post(rig))
+        await asyncio.wait_for(rig.store.wait_started.wait(), 3)
+        assert not duplicate.done() and not rig.model.prompts
+        if outcome == "complete":
+            release.set()
+            responses = await asyncio.wait_for(asyncio.gather(first, duplicate), 3)
+            assert all(r.status_code == 200 and "Respuesta uno" in r.text for r in responses)
+            assert len(rig.model.prompts) == 1 and rig.resolver.await_count == 1
+            assert rig.store.receipts[1].status == "completed"
+        else:
+            rig.store.record.revoked = True
+            responses = await asyncio.wait_for(asyncio.gather(first, duplicate), 3)
+            assert responses[0].status_code == 200 and "voice_turn_interrupted" in responses[0].text
+            assert responses[1].status_code == 403
+            assert rig.model.prompts == [] and rig.resolver.await_count == 1
+    finally:
+        release.set()
+        for task in (first, duplicate):
+            if task is not None and not task.done():
+                task.cancel()
+        await asyncio.gather(*[t for t in (first, duplicate) if t], return_exceptions=True)
+
+
+@pytest.mark.parametrize("stage", ["prepare", "resolve"])
+async def test_cancellation_before_generation_marks_only_admitted_run_interrupted(rig, stage):
+    entered = asyncio.Event()
+
+    async def hold(*args, **kwargs):
+        entered.set()
+        await asyncio.Event().wait()
+
+    if stage == "prepare":
+        rig.history.ensure_locked.side_effect = hold
+    else:
+        rig.resolver.side_effect = hold
+    pending = asyncio.create_task(post(rig))
+    try:
+        await asyncio.wait_for(entered.wait(), 3)
+        pending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+        assert rig.store.receipts[1].status == "interrupted"
+        assert rig.model.prompts == []
+        # Reintentar el mismo cuerpo no roba el claim ni inicia otro modelo.
+        repeated = await post(rig)
+        assert repeated.status_code == 200 and repeated.text.endswith("data: [DONE]\n\n")
+        assert "Respuesta" not in repeated.text
+    finally:
+        pending.cancel()
+        await asyncio.gather(pending, return_exceptions=True)
+
+
+async def test_split_audio_supersedes_control_roundtrip_runner_with_same_counter(rig):
+    entered, cancelled = asyncio.Event(), asyncio.Event()
+    reads = 0
+
+    @tool
+    async def read_once() -> str:
+        """La primera lectura se cancela; la sucesora continúa."""
+        nonlocal reads
+        reads += 1
+        if reads == 1:
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+        return "fixture read"
+
+    graph = build_graph(
+        model=rig.model,
+        tools=[read_once],
+        prepare_tools=["read_once"],
+        checkpointer=rig.graph.checkpointer,
+    )
+    rig.resolver.side_effect = None
+    rig.resolver.return_value = ResolvedTurn(graph, "base", None, "fake", "fake", 25, "fixture")
+    first_text = "What does my nutrition plan say for lunch today?"
+    second_text = "Please answer briefly."
+    request = body(first_text, tools=LANGUAGE_TOOLS)
+    switched = await post(rig, request)
+    call = next(
+        json.loads(line[6:])["choices"][0]["delta"]["tool_calls"][0]
+        for line in switched.text.splitlines()
+        if '"tool_calls"' in line and '"delta"' in line
+    )
+    request["messages"].extend(
+        [
+            {"role": "assistant", "content": None, "tool_calls": [call]},
+            {"role": "tool", "content": "Changed", "tool_call_id": call["id"]},
+        ]
+    )
+    first = asyncio.create_task(post(rig, request))
+    try:
+        await asyncio.wait_for(entered.wait(), 3)
+        followup = {
+            **request,
+            "messages": [*request["messages"], {"role": "user", "content": second_text}],
+        }
+        result = await asyncio.wait_for(post(rig, followup), 4)
+        old = await asyncio.wait_for(first, 3)
+        assert result.status_code == old.status_code == 200
+        assert "Respuesta uno" in result.text and "Respuesta" not in old.text
+        assert "error" not in old.text and old.text.endswith("data: [DONE]\n\n")
+        assert cancelled.is_set() and len(rig.model.prompts) == 1
+        assert rig.store.receipts[1].status == "superseded"
+        assert rig.store.receipts[2].status == "completed"
+        assert [r.provider_turn for r in rig.store.receipts.values()] == [1, 1]
+        routed = rig.resolver.call_args.kwargs["text"]
+        assert first_text in routed and second_text in routed
+        state = await rig.graph.aget_state({"configurable": {"thread_id": "owner::shared"}})
+        users = [m.content for m in state.values["messages"] if m.type == "human"]
+        assert users == [first_text, second_text]  # Nada de Human compuesto duplicado.
+        assert (await post(rig, followup)).status_code == 200 and len(rig.model.prompts) == 1
+    finally:
+        first.cancel()
+        await asyncio.gather(first, return_exceptions=True)
+
+
+async def test_old_completed_ordinal_is_obsolete_after_new_utterance(rig):
+    assert (await post(rig, body("Uno"))).status_code == 200
+    assert (await post(rig, body("Uno", "Dos"))).status_code == 200
+    old = await post(rig, body("Uno"))
+    assert old.status_code == 200 and old.text.endswith("data: [DONE]\n\n")
+    assert "Respuesta" not in old.text and "error" not in old.text
+    assert len(rig.model.prompts) == 2
+
+
+async def test_changed_previous_prefix_is_rejected_with_safe_diagnostics(rig, caplog):
+    assert (await post(rig, body("Original fixture"))).status_code == 200
+    response = await post(rig, body("Modified fixture", "New fixture"))
+    assert response.status_code == 409 and response.json()["detail"] == "voice_history_changed"
+    assert len(rig.model.prompts) == 1
+    rejection = next(
+        r.getMessage() for r in caplog.records if "voice_history_changed" in r.getMessage()
+    )
+    assert "previous_hash_matches" in rejection and "counter_reused" in rejection
+    assert "fixture" not in rejection and SECRET not in rejection
 
 
 async def test_http_asgi_first_final_token_precedes_generation_end_without_planning(rig):

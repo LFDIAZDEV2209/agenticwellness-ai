@@ -51,6 +51,8 @@ def main() -> None:
         ("downgrade", "fe62a09c1741:e7041890ceaa", "vita-voice-rollback.sql"),
         ("upgrade", "fe62a09c1741:18c4f6a91b20", "vita-history-migration.sql"),
         ("downgrade", "18c4f6a91b20:fe62a09c1741", "vita-history-rollback.sql"),
+        ("upgrade", "18c4f6a91b20:94e1c2b75a06", "vita-native-turns-migration.sql"),
+        ("downgrade", "94e1c2b75a06:18c4f6a91b20", "vita-native-turns-rollback.sql"),
     ):
         result = subprocess.run(
             [sys.executable, "-m", "alembic", action, revision, "--sql"],

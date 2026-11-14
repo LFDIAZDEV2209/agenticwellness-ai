@@ -33,7 +33,8 @@ from app.voice.language import (
     latest_user_index,
     valid_language_followup,
 )
-from app.voice.store import VoiceContextError, voice_store
+from app.voice.store import VoiceBinding, VoiceContextError, voice_store
+from app.voice.turns import AdmittedVoiceGraph, prepare_admitted_turn
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/internal/voice/v1", tags=["voice-runtime"])
@@ -139,7 +140,7 @@ async def completion(
     http_request: Request,
     x_vita_session: str = Header(min_length=1),
     x_vita_conversation: str = Header(min_length=1, max_length=200),
-    x_vita_turn: int = Header(ge=1, le=1000000),
+    x_vita_turn: int = Header(ge=0, le=1000000),
     session=Depends(get_db_session),
     base_graph=Depends(get_graph),
 ) -> StreamingResponse:
@@ -158,48 +159,43 @@ async def completion(
         _check_rate_limit(http_request, record.user_id)
         ordinal, prefix, previous = history_identity(payload.messages)
         switch = language_switch(payload.messages, payload.tools, record.language)
-        if switch:
-
-            async def switch_language():
-                response_id = f"voice:{session_id}:{ordinal}"
-                data = {
-                    "id": response_id,
-                    "object": "chat.completion.chunk",
-                    "created": int(time.time()),
-                    "model": "vita",
-                    "choices": [
-                        {
-                            "index": 0,
-                            "delta": {"tool_calls": [language_chunk(response_id, switch)]},
-                            "finish_reason": None,
-                        }
-                    ],
-                }
-                try:
-                    async with thread_guard(storage_key(record.user_id, record.thread_id)):
-                        await history_service.ensure_locked(
-                            record.user_id, record.thread_id, base_graph.checkpointer
-                        )
-                        await voice_store.get(session_id)
-                        yield f"data: {json.dumps(data)}\n\n"
-                        data["choices"] = [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]
-                        yield f"data: {json.dumps(data)}\n\n"
-                        yield "data: [DONE]\n\n"
-                except (VoiceContextError, ThreadBusyError):
-                    yield 'data: {"error":{"code":"voice_turn_interrupted"}}\n\n'
-
-            return StreamingResponse(
-                switch_language(),
-                media_type="text/event-stream",
-                headers={"Cache-Control": "no-store"},
+        binding = VoiceBinding(record.id, record.user_id, record.thread_id, record.conversation_id)
+        admission = await voice_store.admit_turn(
+            binding,
+            ordinal,
+            x_vita_turn,
+            prefix,
+            previous,
+            phase="control" if switch else "utterance",
+        )
+        if admission.action == "wait":
+            admission = await voice_store.wait_for_turn(
+                admission, timeout=settings.vita_turn_timeout
             )
-        receipt = await voice_store.start_turn(session_id, ordinal, x_vita_turn, prefix, previous)
     except VoiceContextError as exc:
         # Solo códigos de control propios: nunca transcript, firma ni identidad.
-        logger.warning("vita_voice_rejected code=%s http=%s", str(exc), exc.status)
+        logger.warning(
+            "vita_voice_rejected code=%s http=%s flags=%s", str(exc), exc.status, exc.metadata
+        )
         raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
     except VitaAccessError as exc:
         raise HTTPException(status_code=403, detail="voice_access_unavailable") from exc
+    except TimeoutError as exc:
+        raise HTTPException(status_code=503, detail="voice_turn_wait_timeout") from exc
+
+    logger.info("vita_voice_admission action=%s flags=%s", admission.action, admission.metadata)
+
+    def obsolete_response():
+        async def finish():
+            yield _chunk(admission.response_message_id, done=True)
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(
+            finish(), media_type="text/event-stream", headers={"Cache-Control": "no-store"}
+        )
+
+    if admission.action == "obsolete":
+        return obsolete_response()
 
     request = ChatRequest(
         message=compose_voice_input(payload.messages),
@@ -212,60 +208,104 @@ async def completion(
     config["configurable"].update(
         {
             "user_message_id": f"voice:{session_id}:{ordinal}:user",
-            "assistant_message_id": receipt.response_message_id,
+            "assistant_message_id": admission.response_message_id,
             "message_channel": "voice",
             "voice_session_id": record.id,
             "voice_user_text": payload.messages[latest_user_index(payload.messages)].content,
         }
     )
     try:
-        await history_service.prepare_turn(
-            record.user_id, record.thread_id, base_graph.checkpointer, config
+        await prepare_admitted_turn(
+            voice_store,
+            admission,
+            config,
+            base_graph.checkpointer,
+            timeout=settings.vita_turn_timeout,
         )
+    except asyncio.CancelledError:
+        if admission.action == "run":
+            with CancelScope(shield=True):
+                with suppress(VoiceContextError):
+                    await voice_store.finish_admission(admission, "interrupted")
+        raise
     except (VoiceContextError, ThreadBusyError) as exc:
-        if receipt.status != "completed":
+        if admission.action == "run":
             with suppress(VoiceContextError):
-                await voice_store.finish_turn(session_id, ordinal, "interrupted")
+                await voice_store.finish_admission(admission, "interrupted")
+        if str(exc) == "voice_turn_obsolete":
+            return obsolete_response()
         raise HTTPException(status_code=getattr(exc, "status", 409), detail=str(exc)) from exc
     except Exception as exc:
-        with suppress(VoiceContextError):
-            await voice_store.finish_turn(session_id, ordinal, "interrupted")
+        if admission.action == "run":
+            with suppress(VoiceContextError):
+                await voice_store.finish_admission(admission, "interrupted")
         raise HTTPException(status_code=503, detail="history_state_unavailable") from exc
-    if receipt.status == "completed":
-        snapshot = await base_graph.aget_state(config)
-        message = next(
-            (
-                m
-                for m in (snapshot.values or {}).get("messages", [])
-                if m.id == receipt.response_message_id
-            ),
-            None,
+
+    if admission.action == "control":
+
+        async def switch_language():
+            response_id = admission.response_message_id
+            data = {
+                "id": response_id,
+                "object": "chat.completion.chunk",
+                "created": int(time.time()),
+                "model": "vita",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"tool_calls": [language_chunk(response_id, switch)]},
+                        "finish_reason": None,
+                    }
+                ],
+            }
+            try:
+                async with thread_guard(storage_key(record.user_id, record.thread_id)):
+                    await history_service.before_turn_locked(base_graph, config)
+                    await voice_store.check_current(admission)
+                    yield f"data: {json.dumps(data)}\n\n"
+                    data["choices"] = [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]
+                    yield f"data: {json.dumps(data)}\n\n"
+                    yield "data: [DONE]\n\n"
+            except (VoiceContextError, ThreadBusyError) as exc:
+                if str(exc) == "voice_turn_obsolete":
+                    yield _chunk(response_id, done=True)
+                    yield "data: [DONE]\n\n"
+                else:
+                    yield 'data: {"error":{"code":"voice_turn_interrupted"}}\n\n'
+
+        return StreamingResponse(
+            switch_language(), media_type="text/event-stream", headers={"Cache-Control": "no-store"}
         )
-        if message is None:
-            raise HTTPException(status_code=409, detail="voice_receipt_without_checkpoint")
+
+    if admission.action == "replay":
 
         async def replay():
             try:
                 async with thread_guard(config["configurable"]["thread_id"]):
                     await history_service.before_turn_locked(base_graph, config)
+                    await voice_store.check_current(admission, completed_ok=True)
                     current = await base_graph.aget_state(config)
                     replay_message = next(
                         (
                             m
                             for m in (current.values or {}).get("messages", [])
-                            if m.id == receipt.response_message_id
+                            if m.id == admission.response_message_id
                         ),
                         None,
                     )
                     if replay_message is None:
                         raise VoiceContextError("voice_receipt_without_checkpoint", 409)
                     yield _chunk(
-                        receipt.response_message_id, extract_message_text(replay_message.content)
+                        admission.response_message_id, extract_message_text(replay_message.content)
                     )
-                    yield _chunk(receipt.response_message_id, done=True)
+                    yield _chunk(admission.response_message_id, done=True)
                     yield "data: [DONE]\n\n"
-            except (VoiceContextError, ThreadBusyError):
-                yield 'data: {"error":{"code":"voice_turn_interrupted"}}\n\n'
+            except (VoiceContextError, ThreadBusyError) as exc:
+                if str(exc) == "voice_turn_obsolete":
+                    yield _chunk(admission.response_message_id, done=True)
+                    yield "data: [DONE]\n\n"
+                else:
+                    yield 'data: {"error":{"code":"voice_turn_interrupted"}}\n\n'
 
         return StreamingResponse(replay(), media_type="text/event-stream")
     try:
@@ -278,8 +318,15 @@ async def completion(
             channel="voice",
         )
         config["recursion_limit"] = turn.recursion_limit
+    except asyncio.CancelledError:
+        with CancelScope(shield=True):
+            with suppress(VoiceContextError):
+                await voice_store.finish_admission(admission, "interrupted")
+        raise
     except Exception as exc:
-        await voice_store.finish_turn(session_id, ordinal, "interrupted")
+        await voice_store.finish_admission(admission, "interrupted")
+        if str(exc) == "voice_turn_obsolete":
+            return obsolete_response()
         raise HTTPException(status_code=503, detail="voice_runtime_unavailable") from exc
 
     async def events():
@@ -287,7 +334,10 @@ async def completion(
         first_token_ms = None
         state, completed = None, False
         next_access_check = time.monotonic() + 1
-        stream = turn.graph.astream(
+        graph = AdmittedVoiceGraph(
+            turn.graph, voice_store, admission, wait_timeout=settings.vita_turn_timeout
+        )
+        stream = graph.astream(
             {"input": request.message, "agent": turn.agent_id},
             config=config,
             stream_mode=["messages", "values"],
@@ -301,7 +351,7 @@ async def completion(
                         await asyncio.wait({pending}, timeout=0.25)
                         # Lectura durable en otra conexión: la revocación de otra
                         # réplica cancela hasta una tool/LLM que aún no emite tokens.
-                        await voice_store.get(session_id)
+                        await voice_store.check_current(admission)
                         if time.monotonic() >= next_access_check:
                             await read_catalog(record.user_id)
                             next_access_check = time.monotonic() + 1
@@ -324,19 +374,25 @@ async def completion(
                                 continue
                             if first_token_ms is None:
                                 first_token_ms = int((time.perf_counter() - started) * 1000)
-                            yield _chunk(receipt.response_message_id, text)
+                            await voice_store.check_current(admission)
+                            yield _chunk(admission.response_message_id, text)
                 if state is None:
                     raise VoiceContextError("voice_stream_incomplete", 502)
                 if first_token_ms is None:
                     first_token_ms = int((time.perf_counter() - started) * 1000)
-                    yield _chunk(receipt.response_message_id, _extract_answer(state))
-                await voice_store.get(session_id)
-                await voice_store.finish_turn(session_id, ordinal, "completed")
+                    await voice_store.check_current(admission)
+                    yield _chunk(admission.response_message_id, _extract_answer(state))
+                if not await voice_store.finish_admission(admission, "completed"):
+                    raise VoiceContextError("voice_turn_obsolete", 409)
                 completed = True
-                yield _chunk(receipt.response_message_id, done=True)
+                yield _chunk(admission.response_message_id, done=True)
                 yield "data: [DONE]\n\n"
-        except (VoiceContextError, VitaAccessError, TimeoutError, ThreadBusyError):
-            yield 'data: {"error":{"code":"voice_turn_interrupted"}}\n\n'
+        except (VoiceContextError, VitaAccessError, TimeoutError, ThreadBusyError) as exc:
+            if str(exc) == "voice_turn_obsolete":
+                yield _chunk(admission.response_message_id, done=True)
+                yield "data: [DONE]\n\n"
+            else:
+                yield 'data: {"error":{"code":"voice_turn_interrupted"}}\n\n'
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -347,14 +403,18 @@ async def completion(
             # puede interrumpir la limpieza antes de propagar la cancelación a
             # la tool y cerrar el stream/checkpoint.
             with CancelScope(shield=True):
-                if pending and not pending.done():
-                    pending.cancel()
-                    with suppress(asyncio.CancelledError, StopAsyncIteration):
+                if pending:
+                    if not pending.done():
+                        pending.cancel()
+                    # También recuperar la excepción si el wrapper acabó antes
+                    # del sondeo de revocación del adaptador.
+                    with suppress(asyncio.CancelledError, Exception):
                         await pending
                 with suppress(Exception):
                     await stream.aclose()
                 if not completed:
-                    await voice_store.finish_turn(session_id, ordinal, "interrupted")
+                    with suppress(VoiceContextError):
+                        await voice_store.finish_admission(admission, "interrupted")
             logger.info(
                 "vita_voice_turn agent=%s version=%s reason=%s "
                 "first_token_ms=%s duration_ms=%s status=%s tools=%s source_count=%s language=%s",

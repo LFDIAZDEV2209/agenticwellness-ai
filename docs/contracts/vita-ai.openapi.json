@@ -537,7 +537,7 @@
             "schema": {
               "type": "integer",
               "maximum": 1000000,
-              "minimum": 1,
+              "minimum": 0,
               "title": "X-Vita-Turn"
             }
           },

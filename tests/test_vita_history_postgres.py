@@ -412,7 +412,7 @@ async def test_http_custom_llm_uses_durable_history_and_clear_revokes_replay(rig
             sid, int(record.expires_at.timestamp()), settings.vita_voice_context_secret
         ),
         "X-Vita-Conversation": record.conversation_id,
-        "X-Vita-Turn": "1",
+        "X-Vita-Turn": "0",
     }
     payload = {"stream": True, "messages": [{"role": "user", "content": "Hola"}]}
     path = "/internal/voice/v1/chat/completions"
@@ -421,12 +421,144 @@ async def test_http_custom_llm_uses_durable_history_and_clear_revokes_replay(rig
     replay = await rig.client.post(path, json=payload, headers=headers)
     assert replay.status_code == 200 and "fixture response" in replay.text
     resolver.assert_awaited_once()
+    followup = {
+        "stream": True,
+        "messages": [*payload["messages"], {"role": "user", "content": "Segunda consulta"}],
+    }
+    second = await rig.client.post(path, json=followup, headers=headers)
+    assert second.status_code == 200 and "fixture response" in second.text
+    assert resolver.await_count == 2
+    async with rig.sessions() as sql:
+        receipts = (
+            (
+                await sql.execute(
+                    select(store.VitaVoiceTurn)
+                    .where(store.VitaVoiceTurn.session_id == sid)
+                    .order_by(store.VitaVoiceTurn.ordinal)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert [r.provider_turn for r in receipts] == [0, 0]
+        assert [r.status for r in receipts] == ["completed", "completed"]
+    obsolete = await rig.client.post(path, json=payload, headers=headers)
+    assert obsolete.status_code == 200 and "fixture response" not in obsolete.text
     assert (await clear(rig)).json()["history_revision"] == 1
     rejected = await rig.client.post(path, json=payload, headers=headers)
     assert rejected.status_code == 403
     assert "fixture response" not in rejected.text
-    resolver.assert_awaited_once()
+    assert resolver.await_count == 2
     assert (await rig.graph.aget_state(config())).created_at is None
+
+
+@pytest.mark.parametrize("mode", ["duplicate", "supersede", "revoke"])
+async def test_http_native_admission_races_with_real_postgres(rig, mode, caplog):
+    from langchain_core.tools import tool
+
+    from app.vita.runtime import ResolvedTurn
+
+    settings = get_settings()
+    for name, value in {
+        "voice_enabled": True,
+        "vita_runtime_enabled": True,
+        "vita_voice_enabled": True,
+        "vita_voice_transport_verified": True,
+        "vita_voice_service_key": "fixture-service-" * 3,
+        "vita_voice_context_secret": "fixture-context-" * 3,
+    }.items():
+        rig.monkeypatch.setattr(settings, name, value)
+    rig.monkeypatch.setattr(vita_voice, "history_service", rig.history)
+    rig.monkeypatch.setattr(vita_voice, "read_catalog", AsyncMock(return_value=[]))
+    entered, release, cancelled, waiting = [asyncio.Event() for _ in range(4)]
+    reads = 0
+
+    @tool
+    async def hold_first() -> str:
+        """La primera lectura permite observar el cruce de callbacks HTTP."""
+        nonlocal reads
+        reads += 1
+        if reads == 1:
+            entered.set()
+            try:
+                await release.wait()
+            finally:
+                cancelled.set()
+        return "fixture read"
+
+    graph = build_graph(
+        model=rig.model, tools=[hold_first], prepare_tools=["hold_first"], checkpointer=rig.saver
+    )
+    resolver = AsyncMock(
+        return_value=ResolvedTurn(
+            locking.LockedGraph(graph, "fixture"), "base", None, "fake", "fake", 25, "fixture"
+        )
+    )
+    rig.monkeypatch.setattr(vita_voice, "resolve_turn", resolver)
+    original_wait = store.voice_store.wait_for_turn
+
+    async def wait_probe(*args, **kwargs):
+        waiting.set()
+        return await original_wait(*args, **kwargs)
+
+    rig.monkeypatch.setattr(store.voice_store, "wait_for_turn", wait_probe)
+    sid = await voice(rig)
+    record = await store.voice_store.get(sid)
+    headers = {
+        "Authorization": f"Bearer {settings.vita_voice_service_key}",
+        "X-Vita-Session": sign_context(
+            sid, int(record.expires_at.timestamp()), settings.vita_voice_context_secret
+        ),
+        "X-Vita-Conversation": record.conversation_id,
+        "X-Vita-Turn": "0",
+    }
+    path = "/internal/voice/v1/chat/completions"
+    payload = {"stream": True, "messages": [{"role": "user", "content": "Primera consulta"}]}
+    first = asyncio.create_task(rig.client.post(path, json=payload, headers=headers))
+    second = None
+    try:
+        await asyncio.wait_for(entered.wait(), 4)
+        if mode == "duplicate":
+            second = asyncio.create_task(rig.client.post(path, json=payload, headers=headers))
+            await asyncio.wait_for(waiting.wait(), 4)
+            assert not second.done() and rig.model.prompts == []
+            release.set()
+            responses = await asyncio.wait_for(asyncio.gather(first, second), 5)
+            assert all(r.status_code == 200 and "fixture response" in r.text for r in responses)
+            assert len(rig.model.prompts) == resolver.await_count == 1
+        elif mode == "supersede":
+            followup = {
+                "stream": True,
+                "messages": [*payload["messages"], {"role": "user", "content": "Segunda consulta"}],
+            }
+            new = await asyncio.wait_for(rig.client.post(path, json=followup, headers=headers), 5)
+            old = await asyncio.wait_for(first, 4)
+            assert new.status_code == old.status_code == 200
+            assert "fixture response" in new.text and "fixture response" not in old.text
+            assert "error" not in old.text and old.text.endswith("data: [DONE]\n\n")
+            assert cancelled.is_set() and len(rig.model.prompts) == 1
+            assert resolver.await_count == 2
+            snapshot = await rig.graph.aget_state(config())
+            assert [m.content for m in snapshot.values["messages"] if m.type == "human"] == [
+                "Primera consulta",
+                "Segunda consulta",
+            ]
+        else:
+            await store.voice_store.revoke(sid, "owner")
+            result = await asyncio.wait_for(first, 4)
+            assert result.status_code == 200 and "voice_turn_interrupted" in result.text
+            assert cancelled.is_set() and rig.model.prompts == []
+            assert (await rig.client.post(path, json=payload, headers=headers)).status_code == 403
+        await asyncio.sleep(0)
+        assert not any(
+            "Task exception was never retrieved" in r.getMessage() for r in caplog.records
+        )
+    finally:
+        release.set()
+        for task in (first, second):
+            if task is not None and not task.done():
+                task.cancel()
+        await asyncio.gather(*[t for t in (first, second) if t], return_exceptions=True)
 
 
 async def test_restart_after_checkpoint_deleted_before_revision_commit_finishes_once(rig):
