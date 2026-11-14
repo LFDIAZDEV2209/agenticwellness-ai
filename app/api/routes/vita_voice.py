@@ -194,6 +194,8 @@ async def completion(
             )
         receipt = await voice_store.start_turn(session_id, ordinal, x_vita_turn, prefix, previous)
     except VoiceContextError as exc:
+        # Solo códigos de control propios: nunca transcript, firma ni identidad.
+        logger.warning("vita_voice_rejected code=%s http=%s", str(exc), exc.status)
         raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
     except VitaAccessError as exc:
         raise HTTPException(status_code=403, detail="voice_access_unavailable") from exc

@@ -42,6 +42,27 @@ confirmó seis documentos Listo y 174 chunks de Psicología; Protocolos Generale
 no contiene documentos. Cinco chunks huérfanos quedan excluidos por los filtros del
 vector store. La cuenta de QA autenticada confirmó las seis lecturas de datos `ok`.
 
+### Ajuste de transporte tras audio real
+
+La primera llamada integral reservó y vinculó correctamente la conversación,
+reconoció audio EN y ejecutó `get_my_nutrition` (primer texto 2112 ms, generación
+5885 ms). El proveedor inició callbacks adicionales mientras ese recibo estaba en
+curso: dos 200 seguidos de rechazos 409, y terminó con `custom_llm generation failed`
+(1002). La versión dedicada heredaba `speculative_turn=true` y cascade timeout 4 s.
+La especulación no es compatible con la secuencia durable de este adaptador.
+
+MCP configuró únicamente el dedicado con `speculative_turn=false` y cascade timeout
+8 s; conserva endpointing eager/turn_v3, idioma, herramientas, privacidad y secretos.
+Pin `agtvrsn_0201m7dznav9emvt0ygjvfp6n7d3`. El timeout es un límite de fallo, no una
+pausa añadida a cada respuesta. Se registran exclusivamente códigos de rechazo y
+métricas, nunca firmas, conversaciones ni datos del paciente. Root repite audio tras
+desplegar este pin; no basta con la prueba sintética de API.
+
+En texto publicado, Psicología ya recuperó cinco fragmentos de los documentos
+Las heridas de la infancia y Rompiendo cadenas, respuesta HTTP200 en 8314 ms.
+DELETE real sobre un hilo QA devolvió revisión 1, GET posterior vacío y repetición
+idempotente; la revisión del menú nutricional permaneció idéntica.
+
 Rama `feature/vita-app-orchestration`, base `cbbe9e2` sobre `a576191`. Contrato
 canónico del workspace: `openspec/changes/vita-asistente-integral/CONTRATOS-VITA.md`.
 Respuesta de coordinación: `RESPUESTA-AI-CONTRATO.md` del mismo change. Sin push,
