@@ -55,6 +55,10 @@ _EN_MARKERS = frozenset(
         "feeling",
         "need",
         "help",
+        "open",
+        "show",
+        "play",
+        "explain",
     ]
 )
 _ES_MARKERS = frozenset(
@@ -109,6 +113,10 @@ _ES_MARKERS = frozenset(
         "y",
         "gracias",
         "ayuda",
+        "abre",
+        "pon",
+        "explica",
+        "reproduce",
     ]
 )
 
