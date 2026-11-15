@@ -9,12 +9,20 @@ Para escala real se puede conectar un servicio de embeddings dedicado o pgvector
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import re
+from collections import OrderedDict
+from threading import Lock
 from typing import Protocol
 
 logger = logging.getLogger(__name__)
+
+# Solo recursos de proceso; nunca consultas, tokens de pacientes ni vectores.
+_MAX_OPENAI_RESOURCES = 4
+_openai_resources: OrderedDict[tuple[str, bytes], OpenAIEmbeddingsProvider] = OrderedDict()
+_resource_lock = Lock()
 
 
 class EmbeddingsProvider(Protocol):
@@ -30,11 +38,12 @@ class EmbeddingsProvider(Protocol):
 class OpenAIEmbeddingsProvider:
     """Embeddings de OpenAI (langchain-openai). Requiere OPENAI_API_KEY."""
 
-    def __init__(self, model: str | None = None):
+    def __init__(self, model: str | None = None, *, api_key: str | None = None):
         from app.core.config import get_settings
 
         settings = get_settings()
-        if not settings.openai_api_key:
+        credential = api_key if api_key is not None else settings.openai_api_key
+        if not credential:
             raise RuntimeError(
                 "OPENAI_API_KEY no configurada. Usa HashEmbeddingsProvider para desarrollo."
             )
@@ -42,8 +51,17 @@ class OpenAIEmbeddingsProvider:
 
         self._embeddings = OpenAIEmbeddings(
             model=model or settings.openai_embedding_model,
-            api_key=settings.openai_api_key,
+            api_key=credential,
         )
+        # Mismo encoding y fallback que usa LangChain; no tokeniza ningún texto
+        # ni desactiva check_embedding_ctx_length para consultas/documentos.
+        import tiktoken
+
+        tokenizer_model = self._embeddings.tiktoken_model_name or self._embeddings.model
+        try:
+            tiktoken.encoding_for_model(tokenizer_model)
+        except KeyError:
+            tiktoken.get_encoding("cl100k_base")
         self.dimensions: int = 1536
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
@@ -100,4 +118,29 @@ def get_embeddings(provider: str = "auto") -> EmbeddingsProvider:
     if provider in {"hash", "dev"} or (provider == "auto" and not settings.openai_api_key):
         logger.warning("Usando HashEmbeddingsProvider (solo desarrollo).")
         return HashEmbeddingsProvider()
-    return OpenAIEmbeddingsProvider()
+    if not settings.openai_api_key:
+        # Conserva el error explícito cuando se exige OpenAI sin credencial.
+        return OpenAIEmbeddingsProvider()
+    model, credential = settings.openai_embedding_model, settings.openai_api_key
+    key = (model, hashlib.sha256(credential.encode()).digest())
+    # lru_cache solo no evita construcciones duplicadas ante misses concurrentes.
+    with _resource_lock:
+        resource = _openai_resources.get(key)
+        if resource is None:
+            resource = OpenAIEmbeddingsProvider(model, api_key=credential)
+            _openai_resources[key] = resource
+            if len(_openai_resources) > _MAX_OPENAI_RESOURCES:
+                # No cerrar clientes que todavía puede usar una petición activa.
+                _openai_resources.popitem(last=False)
+        _openai_resources.move_to_end(key)
+        return resource
+
+
+async def prewarm_embeddings() -> None:
+    """Prepara cliente sync/async y encoding, sin llamadas de embeddings ni texto."""
+    try:
+        await asyncio.to_thread(get_embeddings, "openai")
+    except Exception:
+        # El traceback de startup no debe serializar errores del SDK/config con
+        # credenciales. No servir Vita si sus recursos no quedaron preparados.
+        raise RuntimeError("No fue posible preparar los recursos embeddings de Vita") from None

@@ -42,6 +42,14 @@ async def lifespan(_app: FastAPI):
         from app.db.engine import run_db_migrations
 
         await asyncio.to_thread(run_db_migrations)
+    if (
+        settings.environment.lower() != "test"
+        and settings.vita_runtime_enabled
+        and settings.openai_api_key
+    ):
+        from app.rag.embeddings import prewarm_embeddings
+
+        await prewarm_embeddings()
     from app.history.service import retention_worker
 
     async with retention_worker():

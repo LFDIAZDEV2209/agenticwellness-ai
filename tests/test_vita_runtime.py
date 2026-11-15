@@ -7,7 +7,12 @@ import pytest
 from langchain_core.messages import AIMessage
 from langgraph.checkpoint.memory import MemorySaver
 
-from app.agents.prompts import PATIENT_SCOPE_POLICY, SERVICE_DELIVERY_POLICY, VOICE_DELIVERY_POLICY
+from app.agents.prompts import (
+    PATIENT_SCOPE_POLICY,
+    SERVICE_DELIVERY_POLICY,
+    TEXT_DELIVERY_POLICY,
+    VOICE_DELIVERY_POLICY,
+)
 from app.agents.runtime_registry import AgentRuntimeRegistry
 from app.graph.graph import build_graph
 from app.vita import runtime
@@ -220,6 +225,7 @@ async def test_brief_service_delivery_does_not_reduce_documentary_answers(channe
     assert (SERVICE_DELIVERY_POLICY in policies) is expected
     assert policies[0] == PATIENT_SCOPE_POLICY
     assert (VOICE_DELIVERY_POLICY in policies) is (channel == "voice")
+    assert (TEXT_DELIVERY_POLICY in policies) is (channel == "text")
 
 
 @pytest.mark.parametrize("recorded", [False, True])

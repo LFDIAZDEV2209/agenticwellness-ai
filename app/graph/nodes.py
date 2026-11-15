@@ -18,6 +18,7 @@ from app.agents.prompts import (
     BASE_SYSTEM_PROMPT,
     PATIENT_SCOPE_POLICY,
     SERVICE_DELIVERY_POLICY,
+    TEXT_DELIVERY_POLICY,
     VOICE_DELIVERY_POLICY,
     WHATSAPP_SCOPE_POLICY,
     build_control_guidance,
@@ -295,8 +296,11 @@ def make_agent_node(
                 )
             )
 
-        if configurable.get("vita_history") is not None and service_query(state.get("input", "")):
-            system_blocks.append(SERVICE_DELIVERY_POLICY)
+        if configurable.get("vita_history") is not None:
+            if configurable.get("message_channel") != "voice":
+                system_blocks.append(TEXT_DELIVERY_POLICY)
+            if service_query(state.get("input", "")):
+                system_blocks.append(SERVICE_DELIVERY_POLICY)
 
         if configurable.get("message_channel") == "voice":
             # La entrega oral cierra las políticas de sistema; los datos del

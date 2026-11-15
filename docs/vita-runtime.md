@@ -460,6 +460,29 @@ el planificador aunque los dos elementos parezcan compartir scope, para evitar
 omitir una segunda intención no reconocida por patrones. La revisión de esta
 frontera pasó 46 frases ES/EN y 92 aserciones en memoria.
 
+### Preparación de recursos RAG y formato del chat
+
+QA vocal encontró `tool_timeout` real en el checkpoint de prueba. Una tarea AWS
+nueva midió 1.359 ms para importar/inicializar embeddings y 850 ms para cargar el
+tokenizador; consumían unos 2,2 s del presupuesto de 3 s antes de HTTP/SQL.
+Se conserva ese presupuesto y la tokenización segura de documentos largos.
+
+| Recurso almacenado | Vida / invalidación | Límite / consistencia |
+| --- | --- | --- |
+| Cliente embeddings, por modelo y huella de credencial | Proceso; cambio de clave/modelo crea otro recurso, LRU y reinicio invalidan | Cuatro instancias SDK como máximo; construcción única bajo lock; no cachea consultas, vectores, documentos ni datos del paciente |
+| Vocabulario público `cl100k_base` | Imagen; actualización de dependencias/imagen | Un encoding en `/opt/tiktoken-cache`, verificable sin red |
+
+El lifespan prepara cliente y encoding antes de atender Vita, sin invocar OpenAI
+ni generar embeddings de ejemplo. Se omite en entorno test. Un fallo impide
+servir la instancia y muestra un error genérico sin mensaje del proveedor. CI
+ejecuta el tokenizador dentro de la imagen con `--network none` antes de ECR.
+El Hash provider de desarrollo sigue creando instancias independientes.
+
+Una política de chat Vita pide respuestas breves (normalmente 60–90 palabras o
+menos para preguntas/resúmenes), párrafos cortos y fuentes relevantes, ampliando
+cuando el usuario pide detalle o lo exigen seguridad/condiciones del plan. No es
+un truncamiento de tokens ni una reducción del alcance clínico obligatorio.
+
 ### Transporte AWS verificado
 
 El dominio `erp.coppadresd.com` usa REST API `cjszd5pv1f`, stage `prod`, recurso

@@ -181,6 +181,18 @@ the user explicitly asks about that feature. Do not append a routine closing que
 The mandatory patient scope and emergency guidance still apply.
 """
 
+TEXT_DELIVERY_POLICY = """VITA CHAT DELIVERY:
+Give the requested fact or main idea first. For a brief question or summary, default
+to 2-4 concise sentences (normally 60-90 words or fewer), not a full report. Expand
+when the user explicitly requests detail or when needed to preserve safety and the
+conditions of an approved instruction. Do not cut off important qualifications.
+Use short paragraphs; use a few brief bullets only when they make the answer easier
+to scan. Avoid decorative headings, separators, repeated greetings and routine
+closing questions. Summarize the relevant evidence instead of reading every field,
+retrieved section, disclaimer or source. Identify the most relevant source title
+when using documentation. Never replace missing evidence with invented facts.
+"""
+
 
 def build_patient_voice_prompt(language: str) -> str:
     """Texto exacto que debe contener la versión de voz fijada para ese idioma."""

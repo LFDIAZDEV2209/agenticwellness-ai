@@ -125,6 +125,9 @@ jobs:
             exit 1
           fi
           docker info --format 'Docker store: {{.Driver}} {{json .DriverStatus}}'
+          # La primera búsqueda no debe descargar el tokenizador dentro del deadline RAG.
+          docker run --rm --network none --entrypoint python "$IMAGE" -c \
+            "import tiktoken; assert tiktoken.get_encoding('cl100k_base').encode('Vita'); print('Tokenizador disponible sin red')"
 
       - name: Push ECR
         run: |
