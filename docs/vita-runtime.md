@@ -483,6 +483,20 @@ menos para preguntas/resúmenes), párrafos cortos y fuentes relevantes, amplian
 cuando el usuario pide detalle o lo exigen seguridad/condiciones del plan. No es
 un truncamiento de tokens ni una reducción del alcance clínico obligatorio.
 
+### Revisiones después de una interrupción
+
+Una llamada real posterior dejó un recibo `interrupted` y decenas de rechazos
+`voice_turn_conflict` mientras ElevenLabs corregía la última transcripción. La
+consulta ECS de solo lectura confirmó el estado durable de ese ordinal. Ahora
+una revisión con texto distinto del último ordinal y prefijo anterior exacto
+recibe una época nueva también después de `interrupted`. No revive escritores
+anteriores ni habilita duplicados idénticos, historia vieja o sesiones revocadas.
+Las regresiones PostgreSQL y HTTP cubren cancelación→revisión→respuesta→replay.
+
+Las preguntas completas ES/EN sobre disponibilidad de Vita tampoco consultan
+RAG ni un clasificador. La respuesta confirma únicamente que puede responder;
+no inventa una causa técnica para una caída o recuperación sin evidencia.
+
 ### Transporte AWS verificado
 
 El dominio `erp.coppadresd.com` usa REST API `cjszd5pv1f`, stage `prod`, recurso

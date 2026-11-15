@@ -125,7 +125,14 @@ async def test_retrieval_is_prepared_once_from_authorized_scope(
 
 @pytest.mark.parametrize("channel", ["text", "voice"])
 @pytest.mark.parametrize(
-    "text", ["Hola Vita cómo estás hoy", "¿Qué puedes hacer?", "How can you help me?"]
+    "text",
+    [
+        "Hola Vita cómo estás hoy",
+        "¿Qué puedes hacer?",
+        "How can you help me?",
+        "¿Y por qué ahora sí funciona?",
+        "Why are you working now?",
+    ],
 )
 async def test_service_does_not_query_global_knowledge(monkeypatch, channel, text):
     checkpoint = MemorySaver()

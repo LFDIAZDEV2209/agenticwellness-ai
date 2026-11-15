@@ -103,6 +103,7 @@ class SimulatedStore:
                         "running",
                         "control",
                         "completed",
+                        "interrupted",
                     }:
                         raise VoiceContextError("voice_turn_conflict", 409, metadata=flags)
                     existing.prefix_hash = prefix
@@ -584,7 +585,7 @@ async def test_http_asgi_cancellation_cancels_tool_and_marks_receipt_interrupted
     rig.model.responses = [
         AIMessage(content="", tool_calls=[{"name": "slow", "args": {}, "id": "slow"}])
     ]
-    rig.graph = build_graph(model=rig.model, tools=[slow], checkpointer=MemorySaver())
+    rig.graph = build_graph(model=rig.model, tools=[slow], checkpointer=rig.graph.checkpointer)
     rig.resolver.side_effect = None
     rig.resolver.return_value = ResolvedTurn(rig.graph, "a", "v", "fake", "fake", 25, "explicit")
     task = asyncio.create_task(post(rig, body("Consulta lenta")))
@@ -594,6 +595,19 @@ async def test_http_asgi_cancellation_cancels_tool_and_marks_receipt_interrupted
         await task
     await asyncio.wait_for(cancelled.wait(), 2)
     assert rig.store.receipts[1].status == "interrupted"
+
+    # La transcripción final puede llegar DESPUÉS de cancelar el runner anterior.
+    # Misma utterance/prefijo previo, texto revisado: nueva época y respuesta útil.
+    previous_id = rig.store.receipts[1].response_message_id
+    rig.model.responses = [AIMessage(content="Respuesta recuperada")]
+    revised = await post(rig, body("Consulta lenta con transcripción final"))
+    assert revised.status_code == 200 and "Respuesta recuperada" in revised.text
+    assert "voice_turn_conflict" not in revised.text
+    assert rig.store.receipts[1].response_message_id != previous_id
+    assert rig.store.receipts[1].status == "completed"
+    replay = await post(rig, body("Consulta lenta con transcripción final"))
+    assert replay.status_code == 200 and "Respuesta recuperada" in replay.text
+    assert len(rig.model.prompts) == 2
 
 
 async def test_revoke_requires_owner_and_invalidates_token(rig):

@@ -82,7 +82,7 @@ Acciones:
 | `run` | Único propietario de generación de esa utterance. Solo esta acción construye el grafo ejecutable. |
 | `wait` | Duplicado de un `running`. Esperar fuera de transacción con `wait_for_turn`; jamás ejecutar otro LLM. |
 | `replay` | Recibo completado todavía vigente. Leer su `response_message_id` del checkpoint bajo guarda. |
-| `obsolete` | Hay un ordinal posterior o el recibo quedó interrumpido/supersedido. Terminar sin texto ni otra generación. |
+| `obsolete` | Hay un ordinal posterior, el recibo fue supersedido o es un duplicado idéntico de uno interrumpido. Terminar sin texto ni otra generación. |
 | `control` | Reserva de la misma utterance para un cambio real de idioma. Solo emitir la llamada nativa; sin LLM ni mensaje Human adicional. |
 
 Un `control` nuevo reserva la fila con estado `control`. Su retorno con la misma
@@ -97,10 +97,10 @@ un ordinal posterior. Un recibo interrumpido nunca se reclama de nuevo para gene
 la utterance siguiente válida sí puede continuar. Frases repetidas en ordinales
 distintos siguen siendo distintas, sin deduplicación por igualdad de texto.
 
-### Enmienda de la última utterance, incluso tras `completed`
+### Enmienda de la última utterance, incluso tras `completed` o `interrupted`
 
 Un hash distinto para el mismo ordinal solo se admite si la fila es la última,
-su estado es `running`, `control` o `completed` y `previous_hash` coincide exactamente con el
+su estado es `running`, `control`, `completed` o `interrupted` y `previous_hash` coincide exactamente con el
 hash canónico de la fila anterior (o SHA256 de `[]` para ordinal 1). Bajo el mismo
 lock SQL de sesión se sustituye únicamente `prefix_hash` y se establece
 `running/run` o `control/control` según la fase nueva. `provider_turn` y ordinal
@@ -114,9 +114,12 @@ Las admisiones del hash viejo pasan a obsoletas: `check_current`, el waiter y el
 fencing de `aput/aput_writes` comparan hash e ID de generación con la fila vigente. Su
 `finish_admission` devuelve `False`, sin marcar interrumpido/completado al sucesor.
 Así una revisión A→B→A no vuelve a habilitar al primer runner A. El ID Human sigue
-estable por utterance. Las filas `interrupted`
-o anteriores a la última no admiten cambio de hash (409), aunque el prefijo previo
-coincida. Cambiar una utterance anterior también sigue rechazándose con 409.
+estable por utterance. Una transcripción revisada después de cancelar el runner
+anterior sigue siendo una enmienda válida del último ordinal: recibe otra época.
+El duplicado idéntico de un recibo `interrupted` sigue siendo `obsolete`, sin otra
+generación. Las filas supersedidas o anteriores a la última no admiten cambio de
+hash (409), aunque el prefijo previo coincida. Cambiar una utterance anterior
+también sigue rechazándose con 409.
 
 Root aplica la revisión a guardrails y reemplaza el sufijo provisional del mismo
 ID Human, incluidas sus tools y AI, antes de generar. Este store no cambia

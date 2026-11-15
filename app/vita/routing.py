@@ -60,6 +60,20 @@ def _positive_text(value: str) -> str:
     )
 
 
+def _availability_query(text: str) -> bool:
+    # Estado de la conversación, no documentación clínica ni datos del plan.
+    return bool(
+        re.fullmatch(
+            r"(?:vita[ ,¿]*)?(?:y |and )?(?:"
+            r"por que (?:(?:ahora (?:si )?|antes no |no ))?(?:funcionas?|respondes|respondias)|"
+            r"(?:ya |ahora )?(?:estas (?:funcionando|disponible|lista)|funcionas|respondes)|"
+            r"why (?:are you|is the (?:chat|voice call|app)) (?:working|responding)(?: now)?|"
+            r"are you (?:working|responding|available|ready)(?: now)?)",
+            text.strip("¿?! .,;"),
+        )
+    )
+
+
 def _service_query(text: str) -> bool:
     text = text.strip("¿?! .,;")
     arithmetic = re.sub(r"^(?:cuanto es|calcula|calculate|what is|how much is)\s+", "", text)
@@ -76,6 +90,8 @@ def _service_query(text: str) -> bool:
     ):
         return True
     if re.search(r"\b(quien eres|who are you|tu nombre|your name)\b", text):
+        return True
+    if _availability_query(text):
         return True
     # Solo ayuda genérica completa: un tema añadido debe conservar su lectura/RAG.
     if re.fullmatch(
@@ -112,6 +128,9 @@ async def select_agent(
         if not matches:
             raise ValueError("agent_not_authorized")
         return RouteDecision(matches[0], "explicit")
+    # «No respondes» describe el servicio; no es la negación de un dominio.
+    if _availability_query(normalize(text)):
+        return RouteDecision(None, "service_fast_path")
     normalized = _positive_text(text)
     # Saludos/identidad no consultan un segundo modelo ni heredan especialista.
     if re.fullmatch(r"[\W]*(?:hola|hello|hi|hey|quien eres|who are you)[\W]*", normalized):

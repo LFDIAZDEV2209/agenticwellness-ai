@@ -109,6 +109,12 @@ async def test_actual_erp_labels_route_bilingually_without_metadata_or_extra_mod
         "What can you do?",
         "What can you help me with?",
         "How can you help me today?",
+        "¿Y por qué ahora sí funciona?",
+        "¿Por qué ahora sí funcionas?",
+        "¿Por qué no respondes?",
+        "Vita, ¿ya estás funcionando?",
+        "Why are you working now?",
+        "Are you responding now?",
         "Esta entrada larga no contiene evidencia temática del catálogo",
     ],
 )
@@ -125,13 +131,16 @@ async def test_service_and_unknown_long_queries_never_invoke_classifier(text, ca
         "¿Qué puedes hacer por mi ansiedad según los documentos de psicología?",
         "How can you help me with anxiety using the psychology protocol?",
         "What can you do with my nutrition plan?",
+        "Según los documentos de psicología, explica por qué funciona la respiración",
     ],
 )
 async def test_capability_introductions_keep_the_actual_topic(text, catalog):
     from app.vita.routing import service_query
 
     assert not service_query(text)
-    assert (await select_agent(text, catalog)).agent is not None
+    assert (
+        await select_agent(text, catalog, classifier=AsyncMock(return_value="psy"))
+    ).agent is not None
 
 
 async def test_structured_classification_only_for_ambiguity_and_bounded_to_catalog(catalog):

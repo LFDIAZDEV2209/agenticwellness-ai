@@ -191,13 +191,14 @@ class VoiceStore:
                 if existing.prefix_hash != prefix_hash:
                     # El final del modelo no confirma que la transcripción sea
                     # inmutable. Solo la última fila admite revisión, incluso
-                    # tras completed; el prefijo anterior queda intacto.
+                    # tras completed/interrupted; el prefijo anterior queda intacto.
                     # El ID actúa como epoch
                     # durable: A→B→A no vuelve a habilitar al primer runner A.
                     if not flags["latest_ordinal_matches"] or existing.status not in {
                         "running",
                         "control",
                         "completed",
+                        "interrupted",
                     }:
                         raise VoiceContextError("voice_turn_conflict", 409, metadata=flags)
                     existing.prefix_hash = prefix_hash
