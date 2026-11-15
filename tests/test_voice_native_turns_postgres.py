@@ -123,7 +123,13 @@ async def test_invalid_previous_prefix_rejects_without_superseding_and_has_safe_
     ordinal, prefix, previous = identity("modified fixture", "fixture two")
     with pytest.raises(VoiceContextError, match="voice_history_changed") as exc:
         await store.voice_store.admit_turn(owner, ordinal, 1, prefix, previous)
-    assert exc.value.metadata == {"previous_hash_matches": False, "counter_reused": True}
+    assert exc.value.metadata == {
+        "previous_hash_matches": False,
+        "counter_reused": True,
+        "existing_completed": False,
+        "latest_ordinal_matches": False,
+        "prefix_hash_matches": False,
+    }
     assert "fixture" not in str(exc.value) and prefix not in str(exc.value)
     await store.voice_store.check_current(first)
     with pytest.raises(VoiceContextError, match="voice_turn_conflict"):
@@ -150,20 +156,40 @@ async def test_control_roundtrip_reserves_one_logical_utterance_and_no_extra_run
     assert rig.model.prompts == []
 
 
-@pytest.mark.parametrize("initial_phase", ["utterance", "control"])
+@pytest.mark.parametrize("initial_state", ["running", "control", "completed"])
 @pytest.mark.parametrize("new_phase", ["utterance", "control"])
-async def test_latest_provisional_utterance_can_be_amended_with_revision_response_id(
-    rig, initial_phase, new_phase
+async def test_latest_utterance_can_be_amended_with_revision_response_id(
+    rig, initial_state, new_phase
 ):
     owner = await binding(rig)
+    initial_phase = "control" if initial_state == "control" else "utterance"
     old = await admit(owner, "provisional fixture", phase=initial_phase)
+    if initial_state == "completed":
+        assert await store.voice_store.finish_admission(old, "completed")
     duplicate = await admit(owner, "provisional fixture", phase=initial_phase)
+    if initial_state == "completed":
+        assert duplicate.action == "replay"
+        assert duplicate.response_message_id == old.response_message_id
+        assert duplicate.metadata == {
+            "previous_hash_matches": True,
+            "counter_reused": True,
+            "existing_completed": True,
+            "latest_ordinal_matches": True,
+            "prefix_hash_matches": True,
+        }
     new = await admit(owner, "final amended fixture", phase=new_phase)
     assert new.action == ("control" if new_phase == "control" else "run")
     assert new.ordinal == old.ordinal and new.response_message_id != old.response_message_id
     assert new.response_message_id.startswith(old.response_message_id + ":")
     assert len(new.response_message_id) <= 128
     assert new.previous_hash_matches and new.counter_reused
+    assert new.metadata == {
+        "previous_hash_matches": True,
+        "counter_reused": True,
+        "existing_completed": initial_state == "completed",
+        "latest_ordinal_matches": True,
+        "prefix_hash_matches": False,
+    }
     with pytest.raises(VoiceContextError, match="obsolete"):
         await store.voice_store.check_current(old)
     if duplicate.action == "wait":
@@ -194,11 +220,13 @@ async def test_latest_provisional_utterance_can_be_amended_with_revision_respons
     assert (await admit(owner, "final amended fixture")).action == "replay"
 
 
-@pytest.mark.parametrize("state", ["completed", "interrupted", "earlier"])
-async def test_amending_finished_or_earlier_utterance_still_conflicts(rig, state):
+@pytest.mark.parametrize("state", ["interrupted", "earlier_running", "earlier_completed"])
+async def test_amending_interrupted_or_earlier_utterance_still_conflicts(rig, state):
     owner = await binding(rig)
     first = await admit(owner, "original fixture")
-    if state == "earlier":
+    if state == "earlier_completed":
+        assert await store.voice_store.finish_admission(first, "completed")
+    if state.startswith("earlier"):
         current = await admit(owner, "original fixture", "next fixture")
     else:
         await store.voice_store.finish_admission(first, state)
@@ -206,35 +234,56 @@ async def test_amending_finished_or_earlier_utterance_still_conflicts(rig, state
     with pytest.raises(VoiceContextError, match="voice_turn_conflict") as exc:
         await admit(owner, "changed fixture")
     assert exc.value.status == 409 and exc.value.metadata["previous_hash_matches"]
+    assert exc.value.metadata["existing_completed"] == (state == "earlier_completed")
+    assert exc.value.metadata["latest_ordinal_matches"] == (state == "interrupted")
+    assert not exc.value.metadata["prefix_hash_matches"]
     async with rig.sessions() as session:
         row = await session.get(store.VitaVoiceTurn, (owner.session_id, 1))
         assert row.prefix_hash == first.prefix_hash
-    if state == "earlier":
+    if state.startswith("earlier"):
         await store.voice_store.check_current(current)
 
 
-async def test_amendment_requires_exact_nonempty_previous_prefix(rig):
+@pytest.mark.parametrize("state", ["running", "completed"])
+@pytest.mark.parametrize("amend", [False, True])
+async def test_amendment_requires_exact_nonempty_previous_prefix(rig, state, amend):
     owner = await binding(rig)
     first = await admit(owner, "immutable previous fixture")
     await store.voice_store.finish_admission(first, "completed")
     current = await admit(owner, "immutable previous fixture", "provisional current fixture")
+    if state == "completed":
+        assert await store.voice_store.finish_admission(current, "completed")
     with pytest.raises(VoiceContextError, match="voice_turn_conflict") as exc:
-        await admit(owner, "modified previous fixture", "amended current fixture")
+        if amend:
+            await admit(owner, "modified previous fixture", "amended current fixture")
+        else:
+            # Ni un duplicado de hash puede omitir la validación del prefijo previo.
+            await store.voice_store.admit_turn(
+                owner, current.ordinal, 1, current.prefix_hash, identity("wrong prior")[1]
+            )
     assert exc.value.status == 409 and not exc.value.metadata["previous_hash_matches"]
-    await store.voice_store.check_current(current)
+    assert exc.value.metadata["existing_completed"] == (state == "completed")
+    assert exc.value.metadata["latest_ordinal_matches"]
+    assert exc.value.metadata["prefix_hash_matches"] == (not amend)
+    await store.voice_store.check_current(current, completed_ok=True)
     valid = await admit(owner, "immutable previous fixture", "amended current fixture")
     assert valid.action == "run" and valid.response_message_id != current.response_message_id
     with pytest.raises(VoiceContextError, match="obsolete"):
         await store.voice_store.check_current(current)
 
 
-@pytest.mark.parametrize("phase", ["utterance", "control"])
+@pytest.mark.parametrize("phase", ["utterance", "control", "completed"])
 async def test_aba_hash_cannot_restore_old_claim_or_waiter(rig, phase):
     owner = await binding(rig)
-    first_a = await admit(owner, "fixture A", phase=phase)
-    waiter_a = await admit(owner, "fixture A") if phase == "utterance" else None
-    middle_b = await admit(owner, "fixture B", phase=phase)
-    final_a = await admit(owner, "fixture A", phase=phase)
+    admission_phase = "control" if phase == "control" else "utterance"
+    first_a = await admit(owner, "fixture A", phase=admission_phase)
+    waiter_a = await admit(owner, "fixture A") if phase != "control" else None
+    if phase == "completed":
+        assert await store.voice_store.finish_admission(first_a, "completed")
+    middle_b = await admit(owner, "fixture B", phase=admission_phase)
+    if phase == "completed":
+        assert await store.voice_store.finish_admission(middle_b, "completed")
+    final_a = await admit(owner, "fixture A", phase=admission_phase)
     assert first_a.prefix_hash == final_a.prefix_hash
     assert len({a.response_message_id for a in (first_a, middle_b, final_a)}) == 3
     for old in (first_a, middle_b):
@@ -264,17 +313,21 @@ async def test_aba_hash_cannot_restore_old_claim_or_waiter(rig, phase):
 
 
 @pytest.mark.parametrize("field", ["user_id", "thread_id", "conversation_id"])
-async def test_admission_and_wait_enforce_session_owner_and_conversation(rig, field):
+@pytest.mark.parametrize("state", ["running", "completed"])
+async def test_admission_and_wait_enforce_session_owner_and_conversation(rig, field, state):
     owner = await binding(rig)
-    with pytest.raises(VoiceContextError, match="voice_context_binding"):
-        await admit(replace(owner, **{field: "other"}), "fixture")
     runner = await admit(owner, "fixture")
     duplicate = await admit(owner, "fixture")
+    if state == "completed":
+        assert await store.voice_store.finish_admission(runner, "completed")
+    with pytest.raises(VoiceContextError, match="voice_context_binding") as exc:
+        await admit(replace(owner, **{field: "other"}), "amended fixture")
+    assert exc.value.status == 403 and exc.value.metadata == {}
     with pytest.raises(VoiceContextError, match="voice_context_binding"):
         await store.voice_store.wait_for_turn(
             replace(duplicate, binding=replace(owner, **{field: "other"}))
         )
-    await store.voice_store.check_current(runner)
+    await store.voice_store.check_current(runner, completed_ok=True)
 
 
 async def test_wait_does_not_hold_transaction_revocation_and_timeout_never_regenerate(rig):
@@ -325,6 +378,80 @@ async def test_waiters_replay_real_checkpoint_with_exactly_one_model_invocation(
     results = await asyncio.gather(*[callback(claim) for claim in claims])
     assert results == ["fixture response"] * 6
     assert len(rig.model.prompts) == 1
+
+
+async def test_completed_revision_runs_once_waiters_replay_and_old_saver_cannot_write(rig):
+    owner = await binding(rig)
+    original = await admit(owner, "original fixture")
+    old_waiter = await admit(owner, "original fixture")
+    old_cfg = config(owner, original)
+    await prepare_admitted_turn(store.voice_store, original, old_cfg, rig.saver)
+    old_graph = AdmittedVoiceGraph(rig.graph, store.voice_store, original)
+    await old_graph.ainvoke({"input": "original fixture", "agent": "base"}, config=old_cfg)
+    assert await store.voice_store.finish_admission(original, "completed")
+    old_replay = await admit(owner, "original fixture", counter=99)
+    assert old_replay.action == "replay"
+    assert old_replay.response_message_id == original.response_message_id
+    assert len(rig.model.prompts) == 1
+
+    replicas = [store.VoiceStore() for _ in range(6)]
+    claims = await asyncio.gather(
+        *[admit(owner, "amended fixture", repository=replica) for replica in replicas]
+    )
+    assert [claim.action for claim in claims].count("run") == 1
+    assert [claim.action for claim in claims].count("wait") == 5
+    revised = next(claim for claim in claims if claim.action == "run")
+    assert revised.existing_completed and not revised.prefix_hash_matches
+    assert revised.ordinal == original.ordinal
+    assert revised.response_message_id != original.response_message_id
+    assert (await store.voice_store.wait_for_turn(old_waiter)).action == "obsolete"
+    with pytest.raises(VoiceContextError, match="obsolete"):
+        await prepare_admitted_turn(store.voice_store, old_replay, old_cfg, rig.saver)
+
+    before = await rig.saver.aget_tuple(old_cfg)
+    with pytest.raises(VoiceContextError, match="obsolete"):
+        await old_graph.checkpointer.aput(before.config, before.checkpoint, before.metadata, {})
+    with pytest.raises(VoiceContextError, match="obsolete"):
+        await old_graph.checkpointer.aput_writes(before.config, [], "obsolete-completed-task")
+    assert (await rig.saver.aget_tuple(old_cfg)).config == before.config
+    assert not await store.voice_store.finish_admission(original, "completed")
+    assert not await store.voice_store.finish_admission(original, "interrupted")
+
+    async def callback(claim):
+        if claim.action == "wait":
+            claim = await store.voice_store.wait_for_turn(claim)
+        cfg = config(owner, claim)
+        await prepare_admitted_turn(store.voice_store, claim, cfg, rig.saver)
+        if claim.action == "run":
+            await AdmittedVoiceGraph(rig.graph, store.voice_store, claim).ainvoke(
+                {"input": "amended fixture", "agent": "base"}, config=cfg
+            )
+            assert await store.voice_store.finish_admission(claim, "completed")
+        else:
+            assert claim.action == "replay"
+        await store.voice_store.check_current(claim, completed_ok=True)
+        snapshot = await rig.graph.aget_state(cfg)
+        return next(
+            m.content for m in snapshot.values["messages"] if m.id == claim.response_message_id
+        )
+
+    assert await asyncio.gather(*[callback(claim) for claim in claims]) == ["fixture response"] * 6
+    assert len(rig.model.prompts) == 2  # Una generación original y una para toda la revisión.
+    replay = await admit(owner, "amended fixture", counter=100)
+    assert replay.action == "replay" and replay.response_message_id == revised.response_message_id
+    assert replay.metadata == {
+        "previous_hash_matches": True,
+        "counter_reused": False,
+        "existing_completed": True,
+        "latest_ordinal_matches": True,
+        "prefix_hash_matches": True,
+    }
+    with pytest.raises(VoiceContextError, match="obsolete"):
+        await store.voice_store.check_current(old_replay, completed_ok=True)
+    async with rig.sessions() as session:
+        row = await session.get(store.VitaVoiceTurn, (owner.session_id, original.ordinal))
+        assert row.status == "completed" and row.prefix_hash == revised.prefix_hash
+        assert row.response_message_id == revised.response_message_id and row.provider_turn == 1
 
 
 async def test_month_rollover_revokes_prepared_claim_without_restoring_checkpoint(rig):

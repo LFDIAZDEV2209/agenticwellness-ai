@@ -1,5 +1,21 @@
 # Admisión durable de utterances nativas Vita
 
+## Integración del incidente de voz doble — 15-11-2026
+
+La respuesta SSE duplicaba texto: chunks del modelo seguidos del AIMessage completo
+persistido con ID estable. El adaptador emite el mensaje completo solo si todavía
+no envió texto; la regresión exige concatenación exacta una sola vez y conserva
+primer token antes del fin de generación. No deduplica palabras legítimas.
+
+La revisión tardía del último ordinal también se admite después de completed con
+prefijo anterior intacto y nueva época; un duplicado idéntico no regenera. HTTP51,
+PG39 y suite completa root **815 passed**, 47 avisos heredados, sin omisiones,
+usando una BD PostgreSQL exclusiva descartable. Ruff/diff-check correctos. La
+fixture HTTP aísla el contador de rate limit por escenario; el límite real sigue
+activo y sus pruebas propias se conservan. No hay cambios de esquema o app.
+La aceptación remota requiere el rollout y audio contra ElevenLabs; la documentación
+del incidente y sus límites está en OpenSpec `INCIDENTE-VOZ-DOBLE-20261115.md`.
+
 ## Evidencia y alcance
 
 `system__agent_turns` cuenta turnos **del agente**; no es un ordinal de utterances
@@ -23,8 +39,10 @@ en curso. El proveedor también enmienda la última utterance provisional con el
 mismo ordinal; no basta con admitir dos ordinales que comparten contador.
 
 Esta implementación admite contadores repetidos como metadatos y mantiene exacto
-el prefijo de las utterances anteriores. Solo la última fila provisional puede
-adoptar un nuevo hash según la regla de enmienda inferior. No inventa contadores.
+el prefijo de las utterances anteriores. Solo la última fila puede adoptar un
+nuevo hash según la regla de enmienda inferior, incluso después de completar su
+generación. El final del modelo no es un ACK del usuario/proveedor que vuelva
+inmutable la transcripción. No inventa contadores.
 Root conserva su `composed_input` para routing/prefetch y el Human visible original
 del último segmento; este carril no modifica route, language, runtime ni nodos.
 
@@ -79,22 +97,24 @@ un ordinal posterior. Un recibo interrumpido nunca se reclama de nuevo para gene
 la utterance siguiente válida sí puede continuar. Frases repetidas en ordinales
 distintos siguen siendo distintas, sin deduplicación por igualdad de texto.
 
-### Enmienda de la última utterance en curso
+### Enmienda de la última utterance, incluso tras `completed`
 
 Un hash distinto para el mismo ordinal solo se admite si la fila es la última,
-su estado es `running` o `control` y `previous_hash` coincide exactamente con el
+su estado es `running`, `control` o `completed` y `previous_hash` coincide exactamente con el
 hash canónico de la fila anterior (o SHA256 de `[]` para ordinal 1). Bajo el mismo
 lock SQL de sesión se sustituye únicamente `prefix_hash` y se establece
 `running/run` o `control/control` según la fase nueva. `provider_turn` y ordinal
 permanecen intactos. Cada enmienda recibe un nuevo ID de respuesta con UUID, usado
 como generación durable además del hash. Un duplicado del nuevo hash espera/reproduce
-normalmente, sin reclamar otra generación.
+normalmente, sin reclamar otra generación. Si la fila ya está `completed` y el
+hash no cambia, la acción sigue siendo `replay`, incluso si cambia el contador
+externo o la fase solicitada: nunca se reabre por un duplicado idéntico.
 
 Las admisiones del hash viejo pasan a obsoletas: `check_current`, el waiter y el
 fencing de `aput/aput_writes` comparan hash e ID de generación con la fila vigente. Su
 `finish_admission` devuelve `False`, sin marcar interrumpido/completado al sucesor.
 Así una revisión A→B→A no vuelve a habilitar al primer runner A. El ID Human sigue
-estable por utterance. Las filas `completed`, `interrupted`
+estable por utterance. Las filas `interrupted`
 o anteriores a la última no admiten cambio de hash (409), aunque el prefijo previo
 coincida. Cambiar una utterance anterior también sigue rechazándose con 409.
 
@@ -110,9 +130,13 @@ actualizado con un ordinal, Human único y eliminación de evidencia provisional
 cancelación, replay, aislamiento y la regresión A→B→A. Los documentos y datos de
 pacientes no se usaron en estas pruebas locales.
 
-`VoiceContextError.metadata` y `TurnAdmission.metadata` solo contienen
-`previous_hash_matches` y `counter_reused`, booleanos calculados en admisión. Root
-puede registrar esos flags junto al código; nunca registrar la admisión completa,
+`VoiceContextError.metadata` y `TurnAdmission.metadata` solo contienen los flags
+`previous_hash_matches`, `counter_reused`, `existing_completed`,
+`latest_ordinal_matches` y `prefix_hash_matches`, booleanos calculados en admisión.
+Los tres últimos indican, antes de aplicar la decisión, si la fila existente está
+completada, si su ordinal es el último y si su hash coincide con el recibido.
+Root puede registrar esos flags junto al código; nunca registrar estados como
+trazas, la admisión completa,
 binding, hashes, firma, contenido o IDs del paciente. Identidad inválida no expone
 diagnóstico sobre filas ajenas. Errores de prefijo/secuencia conservan 409.
 
@@ -219,7 +243,9 @@ saver PostgreSQL real y conexiones independientes. Cubre contador repetido/cero,
 duplicados simultáneos y replay de checkpoint con un solo LLM, wait cancelable,
 supersesión de invocación y stream, fencing antes/después del commit, identidad,
 revocación, expiración, borrado, corte mensual, fase control y rollback no destructivo.
-Los tests no llaman a ElevenLabs ni contienen datos de pacientes.
+Incluye revisión posterior a `completed`, un único runner de la nueva época con
+waiters/replay, bloqueo de `aput/aput_writes` de la admisión antigua y A→B→A tras
+generaciones completadas. Los tests no llaman a ElevenLabs ni contienen datos de pacientes.
 
 ```powershell
 # URI inyectada por aprovisionamiento QA verificado, BD exclusiva descartable.
@@ -230,6 +256,10 @@ uv run ruff check .
 La aceptación HTTP/audio con los nuevos hooks corresponde a root. No se afirma
 que la exportación QA identifique cuál de las dos comparaciones disparó el 409
 original, ni que un cuerpo de proveedor no capturado tenga una forma determinada.
+El MCP/OTel consultado tampoco ofrece el cuerpo raw de las peticiones Custom LLM
+ni el historial de callbacks para acreditar qué cambió después de `completed`.
+La admisión valida ordinal, hashes e identidad; no clasifica contenido ni supone
+una enmienda ASR a partir de la ausencia de `source_medium`.
 
 Evidencia local final sobre la base `4f04514`:
 

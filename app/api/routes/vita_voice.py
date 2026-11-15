@@ -368,6 +368,10 @@ async def completion(
                             and isinstance(message, (AIMessage, AIMessageChunk))
                             and not getattr(message, "tool_calls", None)
                             and not getattr(message, "tool_call_chunks", None)
+                            # LangGraph vuelve a emitir el AIMessage persistido
+                            # con nuestro ID estable al terminar los chunks del
+                            # modelo. Ese snapshot no es otro fragmento hablado.
+                            and (isinstance(message, AIMessageChunk) or first_token_ms is None)
                         ):
                             text = extract_message_text(message.content)
                             if not text:

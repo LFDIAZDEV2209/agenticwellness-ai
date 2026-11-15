@@ -91,12 +91,19 @@ class SimulatedStore:
                 "previous_hash_matches": previous
                 == (prior.prefix_hash if prior else hashlib.sha256(b"[]").hexdigest()),
                 "counter_reused": latest is not None and latest.provider_turn == provider_turn,
+                "existing_completed": existing is not None and existing.status == "completed",
+                "latest_ordinal_matches": latest is not None and latest.ordinal == ordinal,
+                "prefix_hash_matches": existing is not None and existing.prefix_hash == prefix,
             }
             if existing:
                 if not flags["previous_hash_matches"]:
                     raise VoiceContextError("voice_turn_conflict", 409, metadata=flags)
                 if existing.prefix_hash != prefix:
-                    if latest.ordinal != ordinal or existing.status not in {"running", "control"}:
+                    if latest.ordinal != ordinal or existing.status not in {
+                        "running",
+                        "control",
+                        "completed",
+                    }:
                         raise VoiceContextError("voice_turn_conflict", 409, metadata=flags)
                     existing.prefix_hash = prefix
                     existing.response_message_id = (
@@ -204,6 +211,9 @@ class SimulatedStore:
 
 @pytest.fixture
 def rig(monkeypatch):
+    # Cada escenario HTTP tiene usuarios sintéticos propios; no debe heredar
+    # el contador global consumido por escenarios anteriores de toda la suite.
+    monkeypatch.setattr("app.api.routes.chat._rate_limiters", {})
     settings = get_settings()
     for name, value in {
         "voice_enabled": True,
@@ -487,10 +497,11 @@ async def test_replay_does_not_regenerate_and_equal_phrases_at_different_ordinal
     assert first.text.endswith("data: [DONE]\n\n")
 
 
-async def test_conflicting_replay_is_not_a_new_question(rig):
+async def test_changed_earlier_utterance_is_not_a_new_question(rig):
     await post(rig)
+    assert (await post(rig, body("Hola", "Otra pregunta"))).status_code == 200
     assert (await post(rig, body("Texto cambiado"))).status_code == 409
-    assert len(rig.model.prompts) == 1
+    assert len(rig.model.prompts) == 2
 
 
 @pytest.mark.parametrize("field", ["user_id", "userId", "patientId", "thread_id", "session_token"])
@@ -869,6 +880,27 @@ async def test_old_completed_ordinal_is_obsolete_after_new_utterance(rig):
     assert len(rig.model.prompts) == 2
 
 
+async def test_late_latest_revision_after_generation_completes_keeps_voice_chain(rig):
+    first_text = "What is my lunch?"
+    final_text = "What is my lunch today? Please include the portions."
+    first = await post(rig, body(first_text))
+    assert first.status_code == 200 and rig.store.receipts[1].status == "completed"
+    old_response_id = rig.store.receipts[1].response_message_id
+    revised = await post(rig, body(final_text))
+    assert revised.status_code == 200 and "voice_turn_conflict" not in revised.text
+    assert len(rig.model.prompts) == 2
+    assert rig.store.receipts[1].response_message_id != old_response_id
+    replay = await post(rig, body(final_text))
+    assert replay.status_code == 200 and len(rig.model.prompts) == 2
+    snapshot = await rig.graph.aget_state({"configurable": {"thread_id": "owner::shared"}})
+    assert [m.content for m in snapshot.values["messages"] if m.type == "human"] == [final_text]
+    assert len([m for m in snapshot.values["messages"] if m.type == "ai"]) == 1
+    next_question = await post(rig, body(final_text, "What is my assigned podcast?"))
+    assert next_question.status_code == 200 and len(rig.model.prompts) == 3
+    changed_previous = await post(rig, body(first_text, "What is my assigned podcast?"))
+    assert changed_previous.status_code == 409 and len(rig.model.prompts) == 3
+
+
 async def test_changed_previous_prefix_is_rejected_with_safe_diagnostics(rig, caplog):
     assert (await post(rig, body("Original fixture"))).status_code == 200
     response = await post(rig, body("Modified fixture", "New fixture"))
@@ -946,6 +978,12 @@ async def test_http_asgi_first_final_token_precedes_generation_end_without_plann
         await asyncio.wait_for(task, 3)
     response = b"".join(bodies).decode()
     assert "Primero" in response and "después" in response
+    spoken = "".join(
+        json.loads(line[6:])["choices"][0]["delta"].get("content", "")
+        for line in response.splitlines()
+        if line.startswith("data: {")
+    )
+    assert spoken == "Primero después"
     assert "INTERNAL_TOOL_PLANNING" not in response and "SECRET_REASONING" not in response
     assert len(model.prompts) == 1  # Sin generación de planificación ni reescritor.
     assert rig.store.receipts[1].status == "completed"

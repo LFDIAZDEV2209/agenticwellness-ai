@@ -101,12 +101,18 @@ class TurnAdmission:
     response_message_id: str
     previous_hash_matches: bool
     counter_reused: bool
+    existing_completed: bool = False
+    latest_ordinal_matches: bool = False
+    prefix_hash_matches: bool = False
 
     @property
     def metadata(self) -> dict[str, bool]:
         return {
             "previous_hash_matches": self.previous_hash_matches,
             "counter_reused": self.counter_reused,
+            "existing_completed": self.existing_completed,
+            "latest_ordinal_matches": self.latest_ordinal_matches,
+            "prefix_hash_matches": self.prefix_hash_matches,
         }
 
 
@@ -175,16 +181,24 @@ class VoiceStore:
             flags = {
                 "previous_hash_matches": previous_hash == expected,
                 "counter_reused": latest is not None and provider_turn == latest.provider_turn,
+                "existing_completed": existing is not None and existing.status == "completed",
+                "latest_ordinal_matches": latest is not None and latest.ordinal == ordinal,
+                "prefix_hash_matches": existing is not None and existing.prefix_hash == prefix_hash,
             }
             if existing:
                 if not flags["previous_hash_matches"]:
                     raise VoiceContextError("voice_turn_conflict", 409, metadata=flags)
                 if existing.prefix_hash != prefix_hash:
-                    # ElevenLabs puede completar la última utterance mientras
-                    # aún se genera. Solo esa fila provisional es reemplazable;
-                    # el prefijo anterior queda intacto. El ID actúa como epoch
+                    # El final del modelo no confirma que la transcripción sea
+                    # inmutable. Solo la última fila admite revisión, incluso
+                    # tras completed; el prefijo anterior queda intacto.
+                    # El ID actúa como epoch
                     # durable: A→B→A no vuelve a habilitar al primer runner A.
-                    if latest.ordinal != ordinal or existing.status not in {"running", "control"}:
+                    if not flags["latest_ordinal_matches"] or existing.status not in {
+                        "running",
+                        "control",
+                        "completed",
+                    }:
                         raise VoiceContextError("voice_turn_conflict", 409, metadata=flags)
                     existing.prefix_hash = prefix_hash
                     existing.status = "control" if phase == "control" else "running"
