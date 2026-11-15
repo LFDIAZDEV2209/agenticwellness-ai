@@ -48,16 +48,7 @@ async def test_base_and_specialist_can_read_facts_without_erp_tool_config(
     monkeypatch, explicit, channel
 ):
     checkpoint = MemorySaver()
-    model = RecordingFakeModel(
-        responses=[
-            AIMessage(
-                content="", tool_calls=[{"name": "get_my_nutrition", "args": {}, "id": "read"}]
-            ),
-            AIMessage(content="El menú vigente figura en tu plan"),
-        ]
-    )
-    if channel == "voice":
-        model.responses = [AIMessage(content="El menú vigente figura en tu plan")]
+    model = RecordingFakeModel(responses=[AIMessage(content="El menú vigente figura en tu plan")])
     model_options = []
 
     def factory(**options):
@@ -119,7 +110,8 @@ async def test_base_and_specialist_can_read_facts_without_erp_tool_config(
         assert turn.agent_id == AGENT_ID and turn.version_id == VERSION_ID
         assert all(o["model"] == "specialist-effective" for o in model_options)
         assert all(o["provider"] == "openai" for o in model_options)
-    assert len(model.prompts) == (1 if channel == "voice" else 2)
+    assert len(model.prompts) == 1
+    assert "vigente" in str(model.prompts[0])
     assert all(p[0].content == PATIENT_SCOPE_POLICY for p in model.prompts)
     for prompt in model.prompts:
         policies = [message.content for message in prompt if message.type == "system"]

@@ -445,6 +445,11 @@ enumeraban citas como función no disponible. Una política de entrega solo para
 servicio Vita pide dos frases, capacidades disponibles y ausencia de limitaciones
 no solicitadas. No cambia el alcance clínico, la atención de urgencias ni el
 detalle de respuestas documentales. No requiere cambiar la versión nativa remota.
+La lectura personal con scope inequívoco se prepara en código también en texto,
+igual que en voz: una lectura autorizada seguida de una sola llamada de respuesta.
+QA nutricional en AI65 midió 16.418 ms y CloudWatch dos llamadas Anthropic sucesivas;
+se elimina ese planificador redundante, sin omitir BACK ni usar respuestas previas
+como evidencia. Consultas ambiguas conservan su routing y aclaración.
 
 ### Transporte AWS verificado
 

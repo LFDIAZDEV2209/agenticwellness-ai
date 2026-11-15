@@ -158,7 +158,9 @@ async def resolve_turn(
         checkpointer=base_graph.checkpointer,
         tools=tools,
         max_tool_calls=3,
-        prepare_tools=prepare if channel == "voice" or "retrieve_knowledge" in prepare else None,
+        prepare_tools=prepare
+        if scope or channel == "voice" or "retrieve_knowledge" in prepare
+        else None,
     )
     return ResolvedTurn(
         LockedGraph(graph, "capability" if scope else decision.reason),
