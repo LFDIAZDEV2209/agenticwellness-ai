@@ -193,6 +193,10 @@ def service_query(text: str) -> bool:
 def capability_scope(text: str, *, unambiguous: bool = False) -> str | None:
     """Atajos a lecturas; los datos reales y sus permisos siempre vienen de BACK."""
     text = _positive_text(text)
+    # Atajo conservador: las peticiones coordinadas mantienen el planificador,
+    # aunque sus partes parezcan compartir scope. No inferir una sola intención.
+    if unambiguous and re.search(r"\b(y|and|ademas|also|tambien|junto|plus)\b", text):
+        return None
     # Una pregunta conceptual/documental nunca se convierte en una lectura
     # personal por contener «tests», «ejercicios» o «rutina».
     personal = bool(
@@ -222,6 +226,18 @@ def capability_scope(text: str, *, unambiguous: bool = False) -> str | None:
         "day": r"\b(para hoy|tengo hoy|my day|for today|tareas|tasks)\b",
     }
     scopes = [scope for scope, pattern in patterns.items() if re.search(pattern, text)]
+    # «Mi almuerzo para hoy» pide una lectura, no además el resumen del día.
+    # Conserva day si hay una petición propia de tareas/resumen junto al plan.
+    if (
+        unambiguous
+        and len(scopes) > 1
+        and "day" in scopes
+        and not re.search(
+            r"\b(tareas|tasks|my day)\b",
+            text,
+        )
+    ):
+        scopes.remove("day")
     if unambiguous and len(scopes) != 1:
         return None
     return next(iter(scopes), None)

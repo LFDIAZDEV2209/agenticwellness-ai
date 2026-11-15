@@ -454,6 +454,11 @@ El atajo de texto se limita a un único scope reconocido. La revisión detectó
 que preparar solo el primer scope impediría al especialista consultar el segundo
 en peticiones como «mi plan nutricional y mi progreso»; esa petición conserva el
 grafo reactivo. La regresión exige ambas lecturas autorizadas antes de responder.
+«Para hoy / for today» no cuenta como segunda lectura del día en una petición
+simple. El atajo es conservador ante coordinación (`y`, `and`, etc.): mantiene
+el planificador aunque los dos elementos parezcan compartir scope, para evitar
+omitir una segunda intención no reconocida por patrones. La revisión de esta
+frontera pasó 46 frases ES/EN y 92 aserciones en memoria.
 
 ### Transporte AWS verificado
 

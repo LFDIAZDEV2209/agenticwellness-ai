@@ -36,6 +36,18 @@ from tests.test_runtime_registry import AGENT_ID, VERSION_ID, make_session_with_
         ("What is my day?", "day"),
         ("Mi progreso", "progress"),
         ("Show my progress", "progress"),
+        ("Mi plan nutricional para hoy", "nutrition"),
+        ("Show my nutrition plan for today", "nutrition"),
+        ("¿Qué tengo hoy de almuerzo?", "nutrition"),
+        ("What do I have for today for lunch?", "nutrition"),
+        ("Mi rutina para hoy", "exercise"),
+        ("My workout for today", "exercise"),
+        ("Mis podcasts para hoy", "podcast"),
+        ("My podcasts for today", "podcast"),
+        ("Mis tests para hoy", "assessments"),
+        ("My assessments for today", "assessments"),
+        ("Mi progreso para hoy", "progress"),
+        ("My progress for today", "progress"),
     ],
 )
 def test_representative_personal_queries_have_selective_read_route(text, scope):
@@ -44,7 +56,19 @@ def test_representative_personal_queries_have_selective_read_route(text, scope):
 
 
 @pytest.mark.parametrize(
-    "text", ["Muestra mi plan nutricional y mi progreso", "Show my nutrition plan and my progress"]
+    "text",
+    [
+        "Muestra mi plan nutricional y mi progreso",
+        "Show my nutrition plan and my progress",
+        "Mi plan nutricional y mis tareas para hoy",
+        "My nutrition plan and my tasks for today",
+        "Mi plan nutricional y qué tengo para hoy",
+        "My nutrition plan and what do I have for today",
+        "Mi plan nutricional y un resumen del día",
+        "My nutrition plan and a summary of my day",
+        "Mi desayuno y mi almuerzo para hoy",
+        "Show my breakfast and lunch for today",
+    ],
 )
 def test_two_personal_scopes_do_not_claim_single_read_is_sufficient(text):
     assert capability_scope(text) == "nutrition"
