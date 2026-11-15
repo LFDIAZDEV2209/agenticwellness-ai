@@ -1,7 +1,7 @@
 """Integración router→modelo efectivo→tools→checkpoint con modelos falsos."""
 
 from contextlib import asynccontextmanager
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, call
 
 import pytest
 from langchain_core.messages import AIMessage
@@ -40,15 +40,43 @@ from tests.test_runtime_registry import AGENT_ID, VERSION_ID, make_session_with_
 )
 def test_representative_personal_queries_have_selective_read_route(text, scope):
     assert capability_scope(text) == scope
+    assert capability_scope(text, unambiguous=True) == scope
 
 
-@pytest.mark.parametrize("explicit", [False, True])
-@pytest.mark.parametrize("channel", ["text", "voice"])
+@pytest.mark.parametrize(
+    "text", ["Muestra mi plan nutricional y mi progreso", "Show my nutrition plan and my progress"]
+)
+def test_two_personal_scopes_do_not_claim_single_read_is_sufficient(text):
+    assert capability_scope(text) == "nutrition"
+    assert capability_scope(text, unambiguous=True) is None
+
+
+@pytest.mark.parametrize(
+    "channel,explicit,multiple",
+    [
+        ("text", False, False),
+        ("text", True, False),
+        ("voice", False, False),
+        ("voice", True, False),
+        ("text", True, True),
+    ],
+)
 async def test_base_and_specialist_can_read_facts_without_erp_tool_config(
-    monkeypatch, explicit, channel
+    monkeypatch, explicit, channel, multiple
 ):
     checkpoint = MemorySaver()
     model = RecordingFakeModel(responses=[AIMessage(content="El menú vigente figura en tu plan")])
+    if multiple:
+        model.responses.insert(
+            0,
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"name": "get_my_nutrition", "args": {}, "id": "nutrition"},
+                    {"name": "get_my_progress", "args": {}, "id": "progress"},
+                ],
+            ),
+        )
     model_options = []
 
     def factory(**options):
@@ -86,9 +114,10 @@ async def test_base_and_specialist_can_read_facts_without_erp_tool_config(
     base = build_graph(model=model, checkpointer=checkpoint)
     config = {"configurable": {"thread_id": "owner::thread", "user_id": "owner"}}
     config["configurable"]["message_channel"] = channel
+    text = "Mi plan nutricional y mi progreso" if multiple else "Mi plan nutricional"
     turn = await runtime.resolve_turn(
         user_id="owner",
-        text="Mi plan nutricional",
+        text=text,
         session=make_session_with_row(
             {
                 "provider": "openai",
@@ -101,17 +130,22 @@ async def test_base_and_specialist_can_read_facts_without_erp_tool_config(
         explicit=AGENT_ID if explicit else None,
         channel=channel,
     )
-    result = await turn.graph.ainvoke(
-        {"input": "Mi plan nutricional", "agent": turn.agent_id}, config=config
-    )
-    facts.assert_awaited_once_with("nutrition", "owner")
-    assert result["tools_used"] == ["get_my_nutrition"]
+    result = await turn.graph.ainvoke({"input": text, "agent": turn.agent_id}, config=config)
+    if multiple:
+        facts.assert_has_awaits(
+            [call("nutrition", "owner"), call("progress", "owner")], any_order=True
+        )
+        assert facts.await_count == 2
+        assert set(result["tools_used"]) == {"get_my_nutrition", "get_my_progress"}
+    else:
+        facts.assert_awaited_once_with("nutrition", "owner")
+        assert result["tools_used"] == ["get_my_nutrition"]
     if explicit:
         assert turn.agent_id == AGENT_ID and turn.version_id == VERSION_ID
         assert all(o["model"] == "specialist-effective" for o in model_options)
         assert all(o["provider"] == "openai" for o in model_options)
-    assert len(model.prompts) == 1
-    assert "vigente" in str(model.prompts[0])
+    assert len(model.prompts) == (2 if multiple else 1)
+    assert "vigente" in str(model.prompts[-1])
     assert all(p[0].content == PATIENT_SCOPE_POLICY for p in model.prompts)
     for prompt in model.prompts:
         policies = [message.content for message in prompt if message.type == "system"]

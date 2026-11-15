@@ -190,7 +190,7 @@ def service_query(text: str) -> bool:
     return _service_query(normalize(text))
 
 
-def capability_scope(text: str) -> str | None:
+def capability_scope(text: str, *, unambiguous: bool = False) -> str | None:
     """Atajos a lecturas; los datos reales y sus permisos siempre vienen de BACK."""
     text = _positive_text(text)
     # Una pregunta conceptual/documental nunca se convierte en una lectura
@@ -221,4 +221,7 @@ def capability_scope(text: str) -> str | None:
         "progress": r"\b(progreso|racha|xp|progress|streak|pasos|steps)\b",
         "day": r"\b(para hoy|tengo hoy|my day|for today|tareas|tasks)\b",
     }
-    return next((scope for scope, pattern in patterns.items() if re.search(pattern, text)), None)
+    scopes = [scope for scope, pattern in patterns.items() if re.search(pattern, text)]
+    if unambiguous and len(scopes) != 1:
+        return None
+    return next(iter(scopes), None)

@@ -97,6 +97,7 @@ async def resolve_turn(
     snapshot = await base_graph.aget_state(config)
     previous = (snapshot.values or {}).get("agent") if snapshot else None
     scope = capability_scope(text)
+    direct_read = capability_scope(text, unambiguous=True) is not None
     decision = await select_agent(
         text,
         catalog,
@@ -120,6 +121,7 @@ async def resolve_turn(
             compiled,
             channel=channel,
             scope=scope,
+            prepare_personal_read=direct_read,
             ground_knowledge=ground,
             global_knowledge_base_ids=global_ids,
         )
@@ -159,7 +161,7 @@ async def resolve_turn(
         tools=tools,
         max_tool_calls=3,
         prepare_tools=prepare
-        if scope or channel == "voice" or "retrieve_knowledge" in prepare
+        if direct_read or channel == "voice" or "retrieve_knowledge" in prepare
         else None,
     )
     return ResolvedTurn(

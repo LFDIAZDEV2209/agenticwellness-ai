@@ -270,6 +270,7 @@ class AgentRuntimeRegistry:
         *,
         channel: str = "text",
         scope: str | None = None,
+        prepare_personal_read: bool = False,
         ground_knowledge: bool = False,
         global_knowledge_base_ids: list[str] | None = None,
     ) -> CompiledAgent:
@@ -289,7 +290,7 @@ class AgentRuntimeRegistry:
         names = {t.name for t in self._select_tools(config.tools, compiled.agent_type_id)}
         config.tools = sorted((names - {"get_patient_data"}) | VITA_READ_TOOL_NAMES)
         prepare = None
-        if scope or channel == "voice" or ground_knowledge:
+        if prepare_personal_read or channel == "voice" or ground_knowledge:
             prepare = [f"get_my_{scope}"] if scope else []
             if (
                 ground_knowledge

@@ -450,6 +450,10 @@ igual que en voz: una lectura autorizada seguida de una sola llamada de respuest
 QA nutricional en AI65 midió 16.418 ms y CloudWatch dos llamadas Anthropic sucesivas;
 se elimina ese planificador redundante, sin omitir BACK ni usar respuestas previas
 como evidencia. Consultas ambiguas conservan su routing y aclaración.
+El atajo de texto se limita a un único scope reconocido. La revisión detectó
+que preparar solo el primer scope impediría al especialista consultar el segundo
+en peticiones como «mi plan nutricional y mi progreso»; esa petición conserva el
+grafo reactivo. La regresión exige ambas lecturas autorizadas antes de responder.
 
 ### Transporte AWS verificado
 
