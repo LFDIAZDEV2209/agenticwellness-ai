@@ -17,6 +17,7 @@ from langgraph.types import Overwrite
 from app.agents.prompts import (
     BASE_SYSTEM_PROMPT,
     PATIENT_SCOPE_POLICY,
+    SERVICE_DELIVERY_POLICY,
     VOICE_DELIVERY_POLICY,
     WHATSAPP_SCOPE_POLICY,
     build_control_guidance,
@@ -30,6 +31,7 @@ from app.memory.adaptive import AdaptiveMemoryService
 from app.memory.service import UserMemoryService
 from app.safety.guardrails import check_input_guardrails
 from app.tools.registry import TOOLS_BY_NAME, legacy_tools, patient_tools
+from app.vita.routing import service_query
 
 
 def guardrails_node(state: AgentState) -> dict:
@@ -292,6 +294,9 @@ def make_agent_node(
                     allow_appointment=False,
                 )
             )
+
+        if configurable.get("vita_history") is not None and service_query(state.get("input", "")):
+            system_blocks.append(SERVICE_DELIVERY_POLICY)
 
         if configurable.get("message_channel") == "voice":
             # La entrega oral cierra las políticas de sistema; los datos del

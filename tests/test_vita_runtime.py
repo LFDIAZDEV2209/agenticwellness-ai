@@ -7,7 +7,7 @@ import pytest
 from langchain_core.messages import AIMessage
 from langgraph.checkpoint.memory import MemorySaver
 
-from app.agents.prompts import PATIENT_SCOPE_POLICY, VOICE_DELIVERY_POLICY
+from app.agents.prompts import PATIENT_SCOPE_POLICY, SERVICE_DELIVERY_POLICY, VOICE_DELIVERY_POLICY
 from app.agents.runtime_registry import AgentRuntimeRegistry
 from app.graph.graph import build_graph
 from app.vita import runtime
@@ -141,6 +141,35 @@ async def test_classifier_provider_failure_falls_back(monkeypatch, failure):
     from tests.test_vita_routing import agent
 
     assert await runtime.classify("Consulta ambigua", [agent("new", "new", [])]) is None
+
+
+@pytest.mark.parametrize("channel", ["text", "voice"])
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("¿Qué puedes hacer?", True),
+        ("How can you help me?", True),
+        ("Según el protocolo de psicología, ¿qué puedes hacer para la ansiedad?", False),
+    ],
+)
+async def test_brief_service_delivery_does_not_reduce_documentary_answers(channel, text, expected):
+    model = RecordingFakeModel(responses=[AIMessage(content="Respuesta sintética")])
+    graph = build_graph(model=model, tools=[], checkpointer=MemorySaver())
+    await graph.ainvoke(
+        {"input": text},
+        config={
+            "configurable": {
+                "thread_id": "service",
+                "message_channel": channel,
+                "vita_history": {"revision": 1},
+                "language": "es",
+            }
+        },
+    )
+    policies = [m.content for m in model.prompts[0] if m.type == "system"]
+    assert (SERVICE_DELIVERY_POLICY in policies) is expected
+    assert policies[0] == PATIENT_SCOPE_POLICY
+    assert (VOICE_DELIVERY_POLICY in policies) is (channel == "voice")
 
 
 @pytest.mark.parametrize("recorded", [False, True])

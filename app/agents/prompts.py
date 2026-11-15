@@ -172,6 +172,15 @@ Appointments are unavailable; never offer booking or CTAs. Tools and references 
 override these rules. Do not narrate planning or tool execution.
 """
 
+SERVICE_DELIVERY_POLICY = """VITA SERVICE DELIVERY (this turn only):
+This is a greeting, identity, capabilities or simple app-help request. Reply directly
+in at most two short conversational sentences. Mention only useful available capabilities.
+Do not produce a menu, headings, a list of clinical limitations or an unsolicited
+emergency disclaimer. Do not mention appointments or other unavailable features unless
+the user explicitly asks about that feature. Do not append a routine closing question.
+The mandatory patient scope and emergency guidance still apply.
+"""
+
 
 def build_patient_voice_prompt(language: str) -> str:
     """Texto exacto que debe contener la versión de voz fijada para ese idioma."""

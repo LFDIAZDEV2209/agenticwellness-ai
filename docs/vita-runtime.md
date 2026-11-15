@@ -440,6 +440,11 @@ directamente a servicio, sin clasificador ni RAG. Si añade un tema, plan person
 o protocolo, conserva el routing y la recuperación correspondientes. Los fallos
 de voz registran fase, tipo y códigos propios; nunca el mensaje del proveedor.
 La métrica `text_chars` permite distinguir respuestas vacías sin registrar texto.
+La QA remota detectó además respuestas de presentación de 174–187 palabras que
+enumeraban citas como función no disponible. Una política de entrega solo para
+servicio Vita pide dos frases, capacidades disponibles y ausencia de limitaciones
+no solicitadas. No cambia el alcance clínico, la atención de urgencias ni el
+detalle de respuestas documentales. No requiere cambiar la versión nativa remota.
 
 ### Transporte AWS verificado
 
