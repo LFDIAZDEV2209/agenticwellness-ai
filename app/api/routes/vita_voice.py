@@ -11,7 +11,6 @@ from typing import Literal
 
 from anyio import CancelScope
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
-from fastapi.responses import StreamingResponse
 from langchain_core.messages import AIMessage, AIMessageChunk
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -19,6 +18,7 @@ from app.api.deps import get_db_session, get_graph
 from app.api.message_text import extract_message_text
 from app.api.routes.chat import _build_config, _check_rate_limit, _extract_answer
 from app.api.schemas import ChatRequest
+from app.api.streaming import ClosingStreamingResponse as StreamingResponse
 from app.core.config import get_settings
 from app.history.service import history_service, storage_key
 from app.vita.client import VitaAccessError, read_catalog
@@ -38,6 +38,14 @@ from app.voice.turns import AdmittedVoiceGraph, prepare_admitted_turn
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/internal/voice/v1", tags=["voice-runtime"])
+
+
+def _log_failure(phase: str, exc: Exception) -> None:
+    # Solo códigos propios y tipos: una excepción del proveedor puede contener PHI.
+    code = str(exc) if isinstance(exc, (VoiceContextError, ThreadBusyError)) else None
+    logger.warning(
+        "vita_voice_failure phase=%s error_type=%s code=%s", phase, type(exc).__name__, code
+    )
 
 
 class ProviderMessage(BaseModel):
@@ -271,6 +279,7 @@ async def completion(
                     yield _chunk(response_id, done=True)
                     yield "data: [DONE]\n\n"
                 else:
+                    _log_failure("language", exc)
                     yield 'data: {"error":{"code":"voice_turn_interrupted"}}\n\n'
 
         return StreamingResponse(
@@ -305,6 +314,7 @@ async def completion(
                     yield _chunk(admission.response_message_id, done=True)
                     yield "data: [DONE]\n\n"
                 else:
+                    _log_failure("replay", exc)
                     yield 'data: {"error":{"code":"voice_turn_interrupted"}}\n\n'
 
         return StreamingResponse(replay(), media_type="text/event-stream")
@@ -327,11 +337,13 @@ async def completion(
         await voice_store.finish_admission(admission, "interrupted")
         if str(exc) == "voice_turn_obsolete":
             return obsolete_response()
+        _log_failure("resolve", exc)
         raise HTTPException(status_code=503, detail="voice_runtime_unavailable") from exc
 
     async def events():
         started = request_started
         first_token_ms = None
+        text_chars = 0
         state, completed = None, False
         next_access_check = time.monotonic() + 1
         graph = AdmittedVoiceGraph(
@@ -379,13 +391,16 @@ async def completion(
                             if first_token_ms is None:
                                 first_token_ms = int((time.perf_counter() - started) * 1000)
                             await voice_store.check_current(admission)
+                            text_chars += len(text)
                             yield _chunk(admission.response_message_id, text)
                 if state is None:
                     raise VoiceContextError("voice_stream_incomplete", 502)
                 if first_token_ms is None:
                     first_token_ms = int((time.perf_counter() - started) * 1000)
                     await voice_store.check_current(admission)
-                    yield _chunk(admission.response_message_id, _extract_answer(state))
+                    text = _extract_answer(state)
+                    text_chars += len(text)
+                    yield _chunk(admission.response_message_id, text)
                 if not await voice_store.finish_admission(admission, "completed"):
                     raise VoiceContextError("voice_turn_obsolete", 409)
                 completed = True
@@ -396,11 +411,13 @@ async def completion(
                 yield _chunk(admission.response_message_id, done=True)
                 yield "data: [DONE]\n\n"
             else:
+                _log_failure("generate", exc)
                 yield 'data: {"error":{"code":"voice_turn_interrupted"}}\n\n'
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as exc:
             # Nunca serializar errores del proveedor/modelo: pueden contener PHI.
+            _log_failure("generate", exc)
             yield 'data: {"error":{"code":"voice_runtime_error"}}\n\n'
         finally:
             # Starlette cancela dentro de un CancelScope. Sin shield, ese scope
@@ -421,7 +438,8 @@ async def completion(
                         await voice_store.finish_admission(admission, "interrupted")
             logger.info(
                 "vita_voice_turn agent=%s version=%s reason=%s "
-                "first_token_ms=%s duration_ms=%s status=%s tools=%s source_count=%s language=%s",
+                "first_token_ms=%s duration_ms=%s status=%s tools=%s source_count=%s "
+                "language=%s text_chars=%s",
                 turn.agent_id,
                 turn.version_id,
                 turn.reason,
@@ -431,6 +449,7 @@ async def completion(
                 (state or {}).get("tools_used", []),
                 len((state or {}).get("data_sources", [])),
                 request.language,
+                text_chars,
             )
 
     return StreamingResponse(

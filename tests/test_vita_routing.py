@@ -102,6 +102,13 @@ async def test_actual_erp_labels_route_bilingually_without_metadata_or_extra_mod
         "How do I use this app to find my profile?",
         "Necesito ayuda de la app para abrir mi perfil",
         "I need help with the app settings",
+        "¿Qué puedes hacer?",
+        "Vita, ¿qué puedes hacer por mí?",
+        "¿En qué puedes ayudarme?",
+        "¿Cómo me puedes ayudar?",
+        "What can you do?",
+        "What can you help me with?",
+        "How can you help me today?",
         "Esta entrada larga no contiene evidencia temática del catálogo",
     ],
 )
@@ -110,6 +117,21 @@ async def test_service_and_unknown_long_queries_never_invoke_classifier(text, ca
     result = await select_agent(text, catalog, previous="psy", classifier=classifier)
     assert result.agent is None
     classifier.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "¿Qué puedes hacer por mi ansiedad según los documentos de psicología?",
+        "How can you help me with anxiety using the psychology protocol?",
+        "What can you do with my nutrition plan?",
+    ],
+)
+async def test_capability_introductions_keep_the_actual_topic(text, catalog):
+    from app.vita.routing import service_query
+
+    assert not service_query(text)
+    assert (await select_agent(text, catalog)).agent is not None
 
 
 async def test_structured_classification_only_for_ambiguity_and_bounded_to_catalog(catalog):

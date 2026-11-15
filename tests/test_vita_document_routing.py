@@ -123,7 +123,11 @@ async def test_retrieval_is_prepared_once_from_authorized_scope(
     assert "Guía de bienestar" in str(model.prompts[0])
 
 
-async def test_greeting_does_not_query_global_knowledge(monkeypatch):
+@pytest.mark.parametrize("channel", ["text", "voice"])
+@pytest.mark.parametrize(
+    "text", ["Hola Vita cómo estás hoy", "¿Qué puedes hacer?", "How can you help me?"]
+)
+async def test_service_does_not_query_global_knowledge(monkeypatch, channel, text):
     checkpoint = MemorySaver()
     model = RecordingFakeModel(responses=[AIMessage(content="Hola")])
     monkeypatch.setattr(runtime, "read_catalog", AsyncMock(return_value=[]))
@@ -132,10 +136,10 @@ async def test_greeting_does_not_query_global_knowledge(monkeypatch):
     monkeypatch.setattr(runtime, "resolve_knowledge_base_ids", scope)
     await runtime.resolve_turn(
         user_id="owner",
-        text="Hola Vita cómo estás hoy",
+        text=text,
         session=None,
         base_graph=build_graph(model=model, checkpointer=checkpoint),
         config={"configurable": {"thread_id": "owner::greeting"}},
-        channel="voice",
+        channel=channel,
     )
     scope.assert_not_awaited()

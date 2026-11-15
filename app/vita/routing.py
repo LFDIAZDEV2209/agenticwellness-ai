@@ -77,6 +77,14 @@ def _service_query(text: str) -> bool:
         return True
     if re.search(r"\b(quien eres|who are you|tu nombre|your name)\b", text):
         return True
+    # Solo ayuda genérica completa: un tema añadido debe conservar su lectura/RAG.
+    if re.fullmatch(
+        r"(?:vita[ ,¿]*)?(?:que puedes hacer(?: por mi)?|en que puedes ayudarme|"
+        r"como (?:me puedes ayudar|puedes ayudarme)|what can you do(?: for me)?|"
+        r"what can you help me with|how can you help me)(?: hoy| today)?",
+        text,
+    ):
+        return True
     if re.match(r"^(?:gracias|thank you|thanks)\b", text) and not re.search(
         r"\b(pero|but|ahora|now|also)\b", text
     ):

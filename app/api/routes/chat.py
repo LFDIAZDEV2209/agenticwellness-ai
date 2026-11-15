@@ -7,11 +7,10 @@ import json
 import threading
 import time
 import uuid
-from contextlib import aclosing
 from typing import Any
 
+from anyio import CancelScope
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import StreamingResponse
 from langchain_core.messages import AIMessage, AIMessageChunk
 
 from app.agents.runtime_registry import AgentRuntimeError
@@ -26,6 +25,7 @@ from app.api.schemas import (
     FeedbackResponse,
 )
 from app.api.security import require_internal_key
+from app.api.streaming import ClosingStreamingResponse as StreamingResponse
 from app.core.config import get_settings
 from app.core.errors import CoppAiError
 from app.core.logging import get_logger
@@ -267,9 +267,13 @@ async def _bounded_stream(graph, inputs, *, config, vita: bool = False):
         config=config,
         stream_mode=["updates", "messages", "values", "tasks"],
     )
-    async with asyncio.timeout(timeout), aclosing(stream):
-        async for item in stream:
-            yield item
+    try:
+        async with asyncio.timeout(timeout):
+            async for item in stream:
+                yield item
+    finally:
+        with CancelScope(shield=True):
+            await stream.aclose()
 
 
 def _log_execution_error(message: str, *, vita: bool) -> None:
@@ -525,6 +529,7 @@ async def chat_stream(
         # `result`) de cada nodo; se traduce a eventos `flow` con step/ts.
         flow_step = 0
         running_tasks: dict[str, dict[str, Any]] = {}
+        stream = None
         try:
             config = _build_config(thread_id, request, recursion_limit)
             if history_binding is not None:
@@ -532,12 +537,13 @@ async def chat_stream(
             config["configurable"]["execution_id"] = execution_id
             agent_key = request.agent or request.agent_type_id or "base"
 
-            async for mode, chunk in _bounded_stream(
+            stream = _bounded_stream(
                 graph,
                 {"input": request.message, "agent": agent_key},
                 config=config,
                 vita=_is_vita_request(request),
-            ):
+            )
+            async for mode, chunk in stream:
                 if mode == "values":
                     # Estado completo tras cada super-step; el último es el final.
                     if isinstance(chunk, dict):
@@ -629,6 +635,9 @@ async def chat_stream(
             payload = json.dumps({"type": "error", "error": error}, ensure_ascii=False)
             yield f"event: error\ndata: {payload}\n\n"
         finally:
+            if stream is not None:
+                with CancelScope(shield=True):
+                    await stream.aclose()
             latency_ms = int((time.perf_counter() - started) * 1000)
             if error is not None:
                 await tracker.fail(execution_id, error=error, latency_ms=latency_ms)

@@ -416,3 +416,55 @@ cero/repetido, dos segmentos reales QA, espera/replay con un solo LLM, cancelaci
 de la tool, revocación durante espera y finalización sin excepciones sin recuperar.
 Esto acredita integración local; la aceptación de audio remoto se registra en
 el handoff de OpenSpec tras el despliegue.
+
+## Latencia y desconexión de streams (15-11-2026)
+
+CloudWatch registró `vita_thread_busy` (409) al sincronizar el hilo existente,
+mientras un hilo QA nuevo respondía correctamente. PostgreSQL real reprodujo un
+mecanismo compatible: desconexión ASGI durante `send`, generador suspendido en
+`yield` y conexión/advisory lock retenidos hasta cerrar el stream. La cancelación
+directa también podía invalidar la conexión durante su devolución al pool.
+Esto prueba el defecto local; no identifica por sí solo el origen de cada 409
+histórico. Una consulta SQL de solo lectura en AWS no encontró locks activos a
+las 12:40 UTC; no se terminaron conexiones ni se borró historial de pacientes.
+
+Chat y voz cierran explícitamente el iterador de respuesta aunque la desconexión
+ocurra fuera del generador. La guarda, el slot de voz y los streams anidados
+protegen únicamente su limpieza frente a cancelación. Se conserva la exclusión
+durante la generación y no se modifica el checkpoint al liberar el lock. La
+regresión ASGI retiene referencias fuertes para impedir que el GC oculte la fuga:
+pool vacío, hilo reutilizable y checkpoint conservado antes de retornar.
+
+La consulta genérica ES/EN «¿Qué puedes hacer?» / «How can you help me?» pasa
+directamente a servicio, sin clasificador ni RAG. Si añade un tema, plan personal
+o protocolo, conserva el routing y la recuperación correspondientes. Los fallos
+de voz registran fase, tipo y códigos propios; nunca el mensaje del proveedor.
+La métrica `text_chars` permite distinguir respuestas vacías sin registrar texto.
+
+### Transporte AWS verificado
+
+El dominio `erp.coppadresd.com` usa REST API `cjszd5pv1f`, stage `prod`, recurso
+`6lo8gp` (`/{proxy+}`). Su integración POST `HTTP_PROXY`/`VPC_LINK` estaba en
+`BUFFERED`: el SSE público llegó completo en un bloque a los 10.428 ms. Se cambió
+únicamente `responseTransferMode` a `STREAM` y se publicó deployment `zj8ugz`
+(anterior `q25bs5`). La integración POST es compartida; las demás operaciones no
+cambian. No había caché, compresión ni plantillas de transformación incompatibles.
+
+Tras propagarse, la misma consulta entregó 175 fragmentos: cabeceras/primer evento
+a 1.540 ms, fin a 10.605 ms, sin evento de error. Son muestras, no percentiles ni
+tiempo hasta primer token. JSON de chat respondió 200 con `reply` no vacío; chat y
+puente de voz sin credenciales mantuvieron 401. Una llamada QA en ElevenLabs
+confirmó streaming efectivo: primer byte LLM 3.357 ms, primera frase 3.928 ms,
+última frase 5.715 ms y primer audio 4.083 ms; sin duplicados, errores ni cierre
+anormal. Esta muestra usa entrada textual, no acredita micrófono/playback iPhone.
+No se cambió el modelo TTS ni la configuración remota de ElevenLabs.
+
+Rollback inmediato de la publicación del gateway: restaurar el stage al
+deployment `q25bs5`; restaurar también el campo POST a `BUFFERED` antes de una
+futura publicación para evitar reintroducir el cambio. No hacer rollback de
+base de datos ni eliminar conversaciones.
+
+Referencias oficiales:
+- [ElevenLabs: latencia por etapa y streaming](https://elevenlabs.io/blog/voice-agent-latency-optimization).
+- [ElevenLabs: contrato SSE del Custom LLM](https://elevenlabs.io/docs/eleven-agents/customization/llm/custom-llm).
+- [AWS: respuesta incremental del proxy](https://docs.aws.amazon.com/apigateway/latest/developerguide/response-transfer-mode.html).

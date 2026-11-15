@@ -549,6 +549,26 @@ async def test_only_final_visible_text_leaves_adapter(rig):
     assert all("MALICIOUS_SYSTEM" not in m.content for prompt in rig.model.prompts for m in prompt)
 
 
+async def test_provider_error_has_safe_phase_diagnostics_without_private_message(rig, caplog):
+    class BrokenGraph:
+        checkpointer = rig.graph.checkpointer
+
+        async def astream(self, *args, **kwargs):
+            raise RuntimeError("PRIVATE_PROVIDER_PAYLOAD")
+            yield  # pragma: no cover
+
+    rig.resolver.side_effect = None
+    rig.resolver.return_value = ResolvedTurn(
+        BrokenGraph(), "base", None, "fake", "fake", 25, "fixture"
+    )
+    response = await post(rig)
+    assert "voice_runtime_error" in response.text
+    diagnostics = "\n".join(r.getMessage() for r in caplog.records)
+    assert "phase=generate error_type=RuntimeError code=None" in diagnostics
+    assert "PRIVATE_PROVIDER_PAYLOAD" not in response.text + diagnostics
+    assert rig.store.receipts[1].status == "interrupted"
+
+
 async def test_http_asgi_cancellation_cancels_tool_and_marks_receipt_interrupted(rig):
     started, cancelled = asyncio.Event(), asyncio.Event()
 

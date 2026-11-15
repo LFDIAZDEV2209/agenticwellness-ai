@@ -5,6 +5,7 @@ la migración usa la BD descartable del wrapper, nunca bases del producto.
 """
 
 import asyncio
+import json
 import os
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -15,13 +16,15 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 from alembic.config import Config
+from anyio import CancelScope, create_task_group, sleep, sleep_forever
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
-from sqlalchemy import create_engine, inspect, select, text
+from sqlalchemy import create_engine, event, inspect, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from starlette.responses import StreamingResponse
 
 from alembic import command
 from app.api.deps import get_db_session, get_graph
@@ -119,6 +122,7 @@ async def rig(monkeypatch):
                 graph=graph,
                 model=model,
                 client=client,
+                app=app,
                 now=now,
                 schema=schema,
                 monkeypatch=monkeypatch,
@@ -152,6 +156,181 @@ async def seed(rig, user="owner", thread="thread", *, opt_in=True):
         },
     )
     return cfg
+
+
+async def test_thread_guard_anyio_cancel_releases_without_discarding_connection(rig):
+    cfg = await seed(rig)
+    before = await rig.saver.aget_tuple(cfg)
+    invalidated = []
+    event.listen(rig.engine.sync_engine, "invalidate", lambda *args: invalidated.append(args))
+    with CancelScope() as scope:
+        async with locking.thread_guard("owner::thread"):
+            with pytest.raises(locking.ThreadBusyError):
+                async with locking.thread_guard("owner::thread"):
+                    pytest.fail("Debe mantener exclusión durante la ejecución")
+            scope.cancel()
+            await sleep(0)
+    assert rig.engine.pool.checkedout() == 0
+    assert not invalidated, "La cancelación no debe abortar el rollback ni descartar la conexión"
+    async with locking.thread_guard("owner::thread"):
+        pass
+    assert (await rig.saver.aget_tuple(cfg)).config == before.config
+
+
+@pytest.mark.parametrize("consumer", ["anyio", "asgi"])
+async def test_suspended_stream_requires_close_and_cancelled_close_finishes_cleanup(rig, consumer):
+    cfg = await seed(rig)
+    before = await rig.saver.aget_tuple(cfg)
+    closed = asyncio.Event()
+
+    class PausedGraph:
+        checkpointer = rig.saver
+
+        async def astream(self, *args, **kwargs):
+            try:
+                yield "fixture token"
+            finally:
+                await sleep(0)
+                closed.set()
+
+    stream = locking.LockedGraph(PausedGraph(), "test").astream(config=cfg)
+    try:
+        emitted = asyncio.Event()
+        if consumer == "anyio":
+
+            async def consume():
+                assert await anext(stream) == "fixture token"
+                emitted.set()
+                await sleep_forever()
+
+            async with create_task_group() as group:
+                group.start_soon(consume)
+                await emitted.wait()
+                group.cancel_scope.cancel()
+        else:
+
+            async def send(message):
+                if message["type"] == "http.response.body":
+                    assert message["body"] == b"fixture token"
+                    emitted.set()
+                    await sleep_forever()
+
+            async def receive():
+                await emitted.wait()
+                return {"type": "http.disconnect"}
+
+            # Starlette cancela el envío bajo un CancelScope al desconectarse.
+            # El generador anidado sigue suspendido y necesita cierre explícito.
+            response = StreamingResponse(stream)
+            async with asyncio.timeout(3):
+                await response({"type": "http", "asgi": {"spec_version": "2.3"}}, receive, send)
+        assert not closed.is_set()
+        # Un consumidor que abandona el generador debe cerrarlo explícitamente.
+        with pytest.raises(locking.ThreadBusyError):
+            async with locking.thread_guard("owner::thread"):
+                pytest.fail("Un stream aún vivo debe conservar la exclusión")
+        with CancelScope() as scope:
+            scope.cancel()
+            await stream.aclose()
+        assert closed.is_set()
+        assert rig.engine.pool.checkedout() == 0
+        async with locking.thread_guard("owner::thread"):
+            pass
+        assert (await rig.saver.aget_tuple(cfg)).config == before.config
+    finally:
+        with CancelScope(shield=True):
+            await stream.aclose()
+
+
+async def test_chat_stream_asgi_disconnect_releases_lock_before_return_without_gc(rig):
+    cfg = await seed(rig)
+    before = await rig.saver.aget_tuple(cfg)
+    emitted = asyncio.Event()
+    sent = []
+    streams = []
+    responses = []
+    bounded_stream = chat._bounded_stream
+    response_class = chat.StreamingResponse
+
+    def retain_stream(*args, **kwargs):
+        stream = bounded_stream(*args, **kwargs)
+        # Referencia fuerte: el GC no puede cerrar el stream y ocultar la fuga.
+        streams.append(stream)
+        return stream
+
+    def retain_response(*args, **kwargs):
+        response = response_class(*args, **kwargs)
+        responses.append(response)
+        return response
+
+    rig.monkeypatch.setattr(chat, "_bounded_stream", retain_stream)
+    rig.monkeypatch.setattr(chat, "StreamingResponse", retain_response)
+    body = json.dumps(
+        {
+            "message": "disconnect fixture",
+            "user_id": "owner",
+            "thread_id": "thread",
+            "supports_vita": True,
+        }
+    ).encode()
+    received_body = False
+
+    async def receive():
+        nonlocal received_body
+        if not received_body:
+            received_body = True
+            return {"type": "http.request", "body": body, "more_body": False}
+        await emitted.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        sent.append(message)
+        if message["type"] == "http.response.body" and b"event: message\n" in message["body"]:
+            assert b'"type": "token"' in message["body"]
+            with pytest.raises(locking.ThreadBusyError):
+                async with locking.thread_guard("owner::thread"):
+                    pytest.fail("El token debe enviarse con exclusión del hilo")
+            emitted.set()
+            await sleep_forever()
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/api/v1/chat/stream",
+        "raw_path": b"/api/v1/chat/stream",
+        "query_string": b"",
+        "root_path": "",
+        "headers": [
+            (b"content-type", b"application/json"),
+            (b"x-internal-key", get_settings().internal_api_key.encode()),
+        ],
+        "client": ("127.0.0.1", 12345),
+        "server": ("ai.test", 80),
+    }
+    try:
+        async with asyncio.timeout(5):
+            await rig.app(scope, receive, send)
+        assert emitted.is_set(), sent
+        assert sent[0]["type"] == "http.response.start" and sent[0]["status"] == 200
+        # Sin GC, sleeps ni sondeo: debe estar libre al retornar la llamada ASGI.
+        assert rig.engine.pool.checkedout() == 0
+        async with locking.thread_guard("owner::thread"):
+            pass
+        assert len(streams) == 1 and streams[0].ag_frame is None
+        preserved = await rig.saver.aget_tuple(before.config)
+        assert preserved is not None and preserved.checkpoint == before.checkpoint
+        messages = (await rig.graph.aget_state(cfg)).values["messages"]
+        assert [m.content for m in messages[:2]] == ["synthetic fixture", "old response"]
+    finally:
+        # Solo limpieza tras las aserciones; nunca rescata la condición probada.
+        with CancelScope(shield=True):
+            for response in responses:
+                await response.body_iterator.aclose()
+            for stream in streams:
+                await stream.aclose()
 
 
 async def voice(rig, *, user="owner", thread="thread", revoked=False):

@@ -7,16 +7,17 @@ from pathlib import Path
 
 import pytest
 from alembic.config import Config
+from anyio import CancelScope, sleep
 from langchain_core.messages import AIMessage
 from pydantic import Field
-from sqlalchemy import create_engine, inspect, select, text
+from sqlalchemy import create_engine, event, inspect, select, text
 
 from alembic import command
 from app.api.routes.vita_voice import ProviderMessage, history_identity
 from app.graph.graph import build_graph
 from app.voice import store
 from app.voice.store import VoiceBinding, VoiceContextError
-from app.voice.turns import AdmittedVoiceGraph, prepare_admitted_turn
+from app.voice.turns import AdmittedVoiceGraph, _thread_slot, prepare_admitted_turn
 from tests import test_vita_history_postgres as history_tests
 from tests.fakes import RecordingFakeModel
 
@@ -53,6 +54,58 @@ def config(owner, turn):
             "assistant_message_id": turn.response_message_id,
         }
     }
+
+
+async def test_thread_slot_anyio_cancel_releases_without_discarding_connection(rig):
+    owner = await binding(rig)
+    claim = await admit(owner, "fixture")
+    invalidated = []
+    event.listen(rig.engine.sync_engine, "invalidate", lambda *args: invalidated.append(args))
+    cfg = config(owner, claim)
+    with CancelScope() as scope:
+        async with _thread_slot(store.voice_store, claim, cfg):
+            scope.cancel()
+            await sleep(0)
+    assert not invalidated
+    assert rig.engine.pool.checkedout() == 0
+    async with _thread_slot(store.voice_store, claim, cfg, timeout=0.1):
+        pass
+
+
+async def test_voice_stream_cancelled_close_releases_slot_and_preserves_checkpoint(rig):
+    owner = await binding(rig)
+    claim = await admit(owner, "fixture")
+    cfg = config(owner, claim)
+    await history_tests.seed(rig)
+    await prepare_admitted_turn(store.voice_store, claim, cfg, rig.saver)
+    before = await rig.saver.aget_tuple(cfg)
+    closed = asyncio.Event()
+
+    class PausedGraph:
+        checkpointer = rig.saver
+
+        async def astream(self, *args, **kwargs):
+            try:
+                yield "fixture token"
+            finally:
+                await sleep(0)
+                closed.set()
+
+    graph = AdmittedVoiceGraph(PausedGraph(), store.voice_store, claim)
+    stream = graph.astream(config=cfg)
+    try:
+        assert await anext(stream) == "fixture token"
+        with CancelScope() as scope:
+            scope.cancel()
+            await stream.aclose()
+        assert closed.is_set()
+        assert rig.engine.pool.checkedout() == 0
+        async with _thread_slot(store.voice_store, claim, cfg, timeout=0.1):
+            pass
+        assert (await rig.saver.aget_tuple(cfg)).config == before.config
+    finally:
+        with CancelScope(shield=True):
+            await stream.aclose()
 
 
 async def test_repeated_agent_counter_accepts_new_utterance_and_preserves_replay(rig):

@@ -5,7 +5,7 @@ adaptador; conserva su stream y sus filtros. Los waits no retienen transacciones
 """
 
 import asyncio
-from contextlib import aclosing, asynccontextmanager, suppress
+from contextlib import asynccontextmanager, suppress
 from copy import copy
 
 from anyio import CancelScope
@@ -40,7 +40,8 @@ async def _thread_slot(store, admission, config, *, timeout=20.0):
     try:
         yield
     finally:
-        await lock.__aexit__(None, None, None)
+        with CancelScope(shield=True):
+            await lock.__aexit__(None, None, None)
 
 
 async def prepare_admitted_turn(store, admission, config, saver, *, timeout=20.0):
@@ -153,10 +154,13 @@ class AdmittedVoiceGraph:
     async def astream(self, *args, config, **kwargs):
         async with self._execution(config):
             stream = self.graph.astream(*args, config=config, **kwargs)
-            async with aclosing(stream):
+            try:
                 while True:
                     try:
                         item = await self._until_current(anext(stream))
                     except StopAsyncIteration:
                         break
                     yield item
+            finally:
+                with CancelScope(shield=True):
+                    await stream.aclose()
