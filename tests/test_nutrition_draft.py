@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 
 from app.api.main import create_app
 from app.core.config import get_settings
-from app.schemas.nutrition_draft import NutritionDraftRequest
+from app.schemas.nutrition_draft import NutritionDraftNarrative, NutritionDraftRequest
 from app.services.nutrition_draft import generate_nutrition_draft, get_nutrition_model
 
 URL = "/internal/nutrition/plan-draft"
@@ -29,7 +29,6 @@ def client_and_model():
         return_value={
             "narratives": {"es": "Propuesta", "en": "Proposal"},
             "instructions": {"es": "Revisar", "en": "Review"},
-            "menus": PAYLOAD["menus"],
         }
     )
     app = create_app()
@@ -52,6 +51,19 @@ def test_bilingual_schema(client_and_model):
     assert response.status_code == 200
     assert response.json()["source"] == "llm"
     assert set(response.json()["instructions"]) == {"es", "en"}
+    # El LLM no reescribe los menús: se conserva la selección del motor C#.
+    assert response.json()["menus"] == PAYLOAD["menus"]
+
+
+def test_llm_only_returns_narrative_and_receives_compact_context(client_and_model):
+    client, call = client_and_model
+    client.post(URL, json=PAYLOAD, headers={"X-Internal-Key": get_settings().internal_api_key})
+    schema = NutritionDraftNarrative.model_json_schema()
+    assert "narratives" in schema["properties"] and "instructions" in schema["properties"]
+    assert "menus" not in schema["properties"]
+    prompt = call.await_args.args[0][1].content
+    assert "avena" not in prompt and "food_id" not in prompt
+    assert '"key": "des:0"' in prompt
 
 
 @pytest.mark.parametrize(

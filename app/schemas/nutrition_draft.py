@@ -41,9 +41,15 @@ class NutritionMeasuredField(StrictModel):
     value: FiniteFloat | StrictStr | None
     unit: str | None = Field(default=None, max_length=30)
     source: Literal[
-        "health_test_response", "health_test_result", "clinical_measurements",
-        "clinical_context", "patient_profile", "derived_from_birth_date",
-        "derived_from_weight_height", "manual_or_preserved", "missing",
+        "health_test_response",
+        "health_test_result",
+        "clinical_measurements",
+        "clinical_context",
+        "patient_profile",
+        "derived_from_birth_date",
+        "derived_from_weight_height",
+        "manual_or_preserved",
+        "missing",
     ]
     source_code: str | None = Field(default=None, max_length=200)
     observed_at: datetime | None = None
@@ -80,6 +86,13 @@ class NutritionDraftRequest(StrictModel):
         if any(i.food_id not in self.catalog_ids for m in self.menus for i in m.items):
             raise ValueError("Alimento fuera del catálogo")
         return self
+
+
+class NutritionDraftNarrative(StrictModel):
+    """Salida del LLM: solo redacción. Los menús los conserva el motor C#."""
+
+    narratives: BilingualText
+    instructions: BilingualText
 
 
 class NutritionDraftContent(StrictModel):
