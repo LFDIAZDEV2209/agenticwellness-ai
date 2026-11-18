@@ -8,11 +8,13 @@ from pathlib import Path
 import pytest
 from alembic.config import Config
 from anyio import CancelScope, sleep
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.tools import tool
 from pydantic import Field
 from sqlalchemy import create_engine, event, inspect, select, text
 
 from alembic import command
+from app.api.deps import get_graph
 from app.api.routes.vita_voice import ProviderMessage, history_identity
 from app.graph.graph import build_graph
 from app.voice import store
@@ -70,6 +72,98 @@ async def test_thread_slot_anyio_cancel_releases_without_discarding_connection(r
     assert rig.engine.pool.checkedout() == 0
     async with _thread_slot(store.voice_store, claim, cfg, timeout=0.1):
         pass
+
+
+async def test_colgar_durante_tool_y_cambiar_a_chat_conserva_hilo_sano(rig):
+    owner = await binding(rig)
+    claim = await admit(owner, "Lectura interrumpida")
+    cfg = config(owner, claim)
+    entered, closing, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    @tool
+    async def fixture_read() -> str:
+        """Lectura sintética que tarda en cerrar después de la cancelación."""
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            closing.set()
+            await release.wait()
+        return "fixture result"
+
+    model = RecordingFakeModel(
+        responses=[
+            AIMessage(
+                content="", tool_calls=[{"name": "fixture_read", "args": {}, "id": "old-call"}]
+            ),
+            AIMessage(content="Respuesta de chat"),
+        ]
+    )
+    graph = build_graph(model=model, checkpointer=rig.saver, tools=[fixture_read])
+    rig.app.dependency_overrides[get_graph] = lambda: graph
+    await prepare_admitted_turn(store.voice_store, claim, cfg, rig.saver)
+    voice_run = asyncio.create_task(
+        AdmittedVoiceGraph(graph, store.voice_store, claim).ainvoke(
+            {"input": "Lectura interrumpida"},
+            config=cfg,
+        )
+    )
+
+    async def finish_cleanup():
+        await closing.wait()
+        await asyncio.sleep(0.12)
+        release.set()
+
+    cleanup = asyncio.create_task(finish_cleanup())
+    try:
+        async with asyncio.timeout(4):
+            await entered.wait()
+            while not any(
+                getattr(m, "tool_calls", [])
+                for m in (await graph.aget_state(cfg)).values["messages"]
+            ):
+                await asyncio.sleep(0.01)
+            await store.voice_store.revoke(owner.session_id, owner.user_id)
+            await closing.wait()
+            response = await rig.client.post(
+                "/api/v1/chat",
+                json={
+                    "message": "Continúo en chat",
+                    "thread_id": owner.thread_id,
+                    "user_id": owner.user_id,
+                    "supports_vita": True,
+                },
+            )
+        assert response.status_code == 200, response.text
+        assert response.json()["answer"] == "Respuesta de chat"
+        with pytest.raises(VoiceContextError, match="voice_session_inactive"):
+            await voice_run
+        messages = (await graph.aget_state(cfg)).values["messages"]
+        assert not any(getattr(m, "tool_calls", []) or isinstance(m, ToolMessage) for m in messages)
+        assert [m.content for m in messages if m.type == "human"] == [
+            "Lectura interrumpida",
+            "Continúo en chat",
+        ]
+        reconnected = await binding(rig)
+        assert reconnected.session_id != owner.session_id
+        fresh = await admit(reconnected, "Volví a voz")
+        fresh_cfg = config(reconnected, fresh)
+        fresh_model = RecordingFakeModel(responses=[AIMessage(content="Voz reanudada")])
+        fresh_graph = build_graph(model=fresh_model, checkpointer=rig.saver, prepare_tools=[])
+        await prepare_admitted_turn(store.voice_store, fresh, fresh_cfg, rig.saver)
+        answer = await AdmittedVoiceGraph(fresh_graph, store.voice_store, fresh).ainvoke(
+            {"input": "Volví a voz"}, config=fresh_cfg
+        )
+        assert answer["messages"][-1].content == "Voz reanudada"
+        assert await store.voice_store.finish_admission(fresh, "completed")
+        assert (await admit(reconnected, "Volví a voz")).action == "replay"
+        assert len(fresh_model.prompts) == 1
+    finally:
+        release.set()
+        for task in (cleanup, voice_run):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(cleanup, voice_run, return_exceptions=True)
 
 
 async def test_voice_stream_cancelled_close_releases_slot_and_preserves_checkpoint(rig):

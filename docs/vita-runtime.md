@@ -435,6 +435,16 @@ durante la generación y no se modifica el checkpoint al liberar el lock. La
 regresión ASGI retiene referencias fuertes para impedir que el GC oculte la fuga:
 pool vacío, hilo reutilizable y checkpoint conservado antes de retornar.
 
+La regresión de Ola B reprodujo un segundo cierre de canal en PostgreSQL real.
+Al colgar durante una tool, el recibo ya quedaba revocado mientras el cierre
+asíncrono aún retenía el lock. El primer `POST /chat` devolvía `409 vita_thread_busy`.
+Chat Vita espera hasta un segundo al preparar y adquirir el hilo. Las operaciones
+de control y replay de voz usan el mismo slot que la ejecución de una admisión.
+Al iniciar el turno siguiente, guardrails elimina del checkpoint los pares de
+tool incompletos y conserva el mensaje del paciente. La revisión del historial,
+la época de admisión y la revocación siguen verificándose bajo exclusión.
+[Regresión de cuelgue, chat y reconexión](../tests/test_voice_native_turns_postgres.py)
+
 La consulta genérica ES/EN «¿Qué puedes hacer?» / «How can you help me?» pasa
 directamente a servicio, sin clasificador ni RAG. Si añade un tema, plan personal
 o protocolo, conserva el routing y la recuperación correspondientes. Los fallos

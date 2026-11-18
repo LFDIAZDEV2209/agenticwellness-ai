@@ -17,7 +17,7 @@ from sqlalchemy import delete, or_, select, tuple_, update
 from app.db.engine import async_session
 from app.db.models import Message, Thread
 from app.history.store import VitaHistory
-from app.vita.locking import ThreadBusyError, thread_guard
+from app.vita.locking import ThreadBusyError, thread_guard, wait_thread_guard
 from app.voice.store import VitaVoiceSession, VoiceContextError, voice_store
 
 logger = logging.getLogger(__name__)
@@ -163,7 +163,7 @@ class HistoryService:
 
     async def prepare_turn(self, user_id: str, thread_id: str, saver, config: dict) -> None:
         """Opt-in confiable de BACK. Llamar ANTES de resolver el runtime/routing."""
-        async with thread_guard(storage_key(user_id, thread_id)):
+        async with wait_thread_guard(storage_key(user_id, thread_id)):
             record = await self.ensure_locked(user_id, thread_id, saver, opt_in=True)
             if session_id := config["configurable"].get("voice_session_id"):
                 voice = await voice_store.get(session_id)

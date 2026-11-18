@@ -59,7 +59,9 @@ def guardrails_node(state: AgentState) -> dict:
     """
     result = check_input_guardrails(state.get("input", ""))
     configurable = get_config().get("configurable", {})
-    prior_messages = list(state.get("messages", []))
+    stored_messages = list(state.get("messages", []))
+    prior_messages = completed_tool_history(stored_messages)
+    interrupted = len(prior_messages) != len(stored_messages)
     amended_at = None
     if configurable.get("message_channel") == "voice" and configurable.get("user_message_id"):
         amended_at = next(
@@ -78,7 +80,7 @@ def guardrails_node(state: AgentState) -> dict:
         # no deja evidencia antigua en el prompt ni duplica el Human visible.
         return (
             Overwrite([*prior_messages[:amended_at], *messages])
-            if amended_at is not None
+            if amended_at is not None or interrupted
             else messages
         )
 

@@ -20,7 +20,7 @@ from app.api.routes.chat import _build_config, _check_rate_limit, _extract_answe
 from app.api.schemas import ChatRequest
 from app.api.streaming import ClosingStreamingResponse as StreamingResponse
 from app.core.config import get_settings
-from app.history.service import history_service, storage_key
+from app.history.service import history_service
 from app.observability.turn_trace import (
     TurnTraceCollector,
     attach_collector,
@@ -28,7 +28,7 @@ from app.observability.turn_trace import (
     persist_turn,
 )
 from app.vita.client import VitaAccessError, read_catalog
-from app.vita.locking import ThreadBusyError, thread_guard
+from app.vita.locking import ThreadBusyError
 from app.vita.runtime import resolve_turn
 from app.voice.context import verify_context
 from app.voice.input import compose_voice_input
@@ -40,7 +40,7 @@ from app.voice.language import (
     valid_language_followup,
 )
 from app.voice.store import VoiceBinding, VoiceContextError, voice_store
-from app.voice.turns import AdmittedVoiceGraph, prepare_admitted_turn
+from app.voice.turns import AdmittedVoiceGraph, _thread_slot, prepare_admitted_turn
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/internal/voice/v1", tags=["voice-runtime"])
@@ -286,7 +286,9 @@ async def completion(
                 ],
             }
             try:
-                async with thread_guard(storage_key(record.user_id, record.thread_id)):
+                async with _thread_slot(
+                    voice_store, admission, config, timeout=settings.vita_turn_timeout
+                ):
                     await history_service.before_turn_locked(base_graph, config)
                     await voice_store.check_current(admission)
                     yield f"data: {json.dumps(data)}\n\n"
@@ -309,7 +311,9 @@ async def completion(
 
         async def replay():
             try:
-                async with thread_guard(config["configurable"]["thread_id"]):
+                async with _thread_slot(
+                    voice_store, admission, config, timeout=settings.vita_turn_timeout
+                ):
                     await history_service.before_turn_locked(base_graph, config)
                     await voice_store.check_current(admission, completed_ok=True)
                     current = await base_graph.aget_state(config)

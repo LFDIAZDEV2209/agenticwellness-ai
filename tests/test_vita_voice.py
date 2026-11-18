@@ -246,7 +246,6 @@ def rig(monkeypatch):
         async with thread_lock:
             yield
 
-    monkeypatch.setattr(vita_voice, "thread_guard", guarded)
     monkeypatch.setattr("app.voice.turns.thread_guard", guarded)
     model = RecordingFakeModel(
         responses=[
