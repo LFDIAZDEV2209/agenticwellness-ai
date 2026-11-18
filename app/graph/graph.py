@@ -33,6 +33,7 @@ from app.graph.nodes import (
 )
 from app.graph.state import AgentState
 from app.llm.factory import get_chat_model
+from app.rag.pgvector_store import RagScope
 
 
 def _make_route_after_guardrails(enable_memory: bool) -> Any:
@@ -82,6 +83,7 @@ def build_graph(
     tool_timeout_seconds: float = 3,
     prepare_tools: list[str] | None = None,
     final_after_tools: bool = False,
+    retrieval_scope: RagScope = "program",
 ):
     """Construye y compila el grafo supervisor.
 
@@ -112,6 +114,7 @@ def build_graph(
             enable_memory=enable_memory,
             max_tool_calls=max_tool_calls,
             tool_timeout_seconds=tool_timeout_seconds,
+            retrieval_scope=retrieval_scope,
         )
     model = model or get_chat_model(temperature=None)
     workflow = StateGraph(AgentState)
@@ -185,6 +188,7 @@ def _build_final_graph(
     enable_memory,
     max_tool_calls,
     tool_timeout_seconds,
+    retrieval_scope: RagScope,
 ):
     """Lecturas decididas en código → respuesta sin tools que sí puede emitirse en vivo.
 
@@ -208,6 +212,9 @@ def _build_final_graph(
     if prepare_tools:
 
         def prepare(state):
+            rag_arguments = {"query": state["input"]}
+            if retrieval_scope == "patient":
+                rag_arguments["scope"] = retrieval_scope
             return {
                 "messages": [
                     AIMessage(
@@ -216,9 +223,7 @@ def _build_final_graph(
                         tool_calls=[
                             {
                                 "name": name,
-                                "args": {"query": state["input"]}
-                                if name == "retrieve_knowledge"
-                                else {},
+                                "args": rag_arguments if name == "retrieve_knowledge" else {},
                                 "id": f"read-{uuid4()}",
                             }
                             for name in prepare_tools

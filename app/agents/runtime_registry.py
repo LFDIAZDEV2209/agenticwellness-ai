@@ -195,6 +195,8 @@ class AgentRuntimeRegistry:
         runtime_config: AgentRuntimeConfig,
         prepare_tools: list[str] | None = None,
         final_after_tools: bool = False,
+        allow_patient_rag: bool = False,
+        patient_retrieval: bool = False,
     ) -> CompiledAgent:
         """Construye el grafo con los overrides del agente (provider/model/tools)."""
         try:
@@ -219,7 +221,10 @@ class AgentRuntimeRegistry:
         # agentes). `enabled` sin KBs no agrega la tool: un retriever sin filtro
         # recuperaría chunks de KBs ajenas o inactivas.
         retrieval = runtime_config.retrieval_config
-        if retrieval.enabled and retrieval.knowledge_base_ids:
+        kb_ids = retrieval.knowledge_base_ids if retrieval.enabled else []
+        if allow_patient_rag:
+            tools.append(make_retrieve_tool(kb_ids, retrieval.top_k, allow_patient=True))
+        elif kb_ids:
             tools.append(
                 make_retrieve_tool(
                     knowledge_base_ids=retrieval.knowledge_base_ids,
@@ -235,6 +240,7 @@ class AgentRuntimeRegistry:
             tool_timeout_seconds=runtime_config.tool_timeout_seconds,
             prepare_tools=prepare_tools,
             final_after_tools=final_after_tools,
+            retrieval_scope="patient" if patient_retrieval else "program",
             enable_memory=runtime_config.memory_config.enabled,
             checkpointer=(
                 await get_checkpointer()
@@ -276,6 +282,8 @@ class AgentRuntimeRegistry:
         plan_record: bool = False,
         ground_knowledge: bool = False,
         global_knowledge_base_ids: list[str] | None = None,
+        allow_patient_rag: bool = False,
+        patient_retrieval: bool = False,
     ) -> CompiledAgent:
         """Overlay explícito SOLO tras autorización Vita; no cambia la config ERP.
 
@@ -293,7 +301,9 @@ class AgentRuntimeRegistry:
         names = {t.name for t in self._select_tools(config.tools, compiled.agent_type_id)}
         config.tools = sorted((names - {"get_patient_data"}) | VITA_READ_TOOL_NAMES)
         prepare = None
-        if not plan_record and (prepare_personal_read or channel == "voice" or ground_knowledge):
+        if patient_retrieval:
+            prepare = ["retrieve_knowledge"]
+        elif not plan_record and (prepare_personal_read or channel == "voice" or ground_knowledge):
             prepare = [f"get_my_{scope}"] if scope else []
             if (
                 ground_knowledge
@@ -307,6 +317,8 @@ class AgentRuntimeRegistry:
             config,
             prepare_tools=prepare,
             final_after_tools=plan_record and channel == "voice",
+            allow_patient_rag=allow_patient_rag,
+            patient_retrieval=patient_retrieval,
         )
 
 

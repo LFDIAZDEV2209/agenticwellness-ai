@@ -25,6 +25,19 @@ class RetrievedChunk:
     chunk: Chunk
     score: float
 
+    def reference(self) -> dict:
+        metadata = self.chunk.metadata
+        title = str(metadata.get("title") or metadata.get("source") or "Documento sin título")[:255]
+        return {
+            "source": title,
+            "title": title,
+            "heading": str(metadata.get("heading") or "")[:160],
+            "origin": metadata.get("origin", "program"),
+            "date": metadata.get("date"),
+            "date_kind": metadata.get("date_kind"),
+            "score": round(self.score, 4),
+        }
+
 
 class Retriever:
     def __init__(
@@ -77,8 +90,9 @@ class PgVectorRetriever:
         knowledge_base_ids: list[str] | None = None,
         document_id: str | None = None,
         top_k: int | None = None,
+        patient_id: str | None = None,
     ) -> list[RetrievedChunk]:
-        if not knowledge_base_ids:
+        if bool(knowledge_base_ids) == bool(patient_id):
             return []
         settings = get_settings()
         top_k = top_k or settings.rag_top_k
@@ -88,26 +102,34 @@ class PgVectorRetriever:
             if async_query is not None
             else await asyncio.to_thread(self.embeddings.embed_query, query)
         )
+        scope = (
+            {"patient_id": patient_id} if patient_id else {"knowledge_base_ids": knowledge_base_ids}
+        )
         results = await PgVectorStore(session).search(
-            query_vector,
-            top_k,
-            knowledge_base_ids=knowledge_base_ids,
-            document_id=document_id,
+            query_vector, top_k, document_id=document_id, **scope
         )
         return [RetrievedChunk(chunk=chunk, score=score) for chunk, score in results]
 
     def format_context(self, results: list[RetrievedChunk], max_chars: int = 4000) -> str:
-        """Reutiliza el mismo formato citable que `Retriever.format_context`."""
+        """Devuelve extractos con referencias y un tope de caracteres."""
         parts: list[str] = []
         used = 0
         for item in results:
-            if used >= max_chars:
-                break
-            block = (
-                f"[Fuente: {item.chunk.metadata.get('source', '?')} — "
-                f"Sección: {item.chunk.metadata.get('heading', '?')}]\n"
-                f"{item.chunk.content}"
+            reference = item.reference()
+            date_label = "fecha de indexación" if reference["date_kind"] == "indexed" else "fecha"
+            origin = "documento del paciente" if reference["origin"] == "patient" else "programa"
+            header = (
+                f"[Fuente: {reference['title']} — Origen: {origin} — "
+                f"{date_label}: {reference['date'] or 'no consta'} — "
+                f"Sección: {reference['heading']}]\n"
             )
+            remaining = max_chars - used - len(header) - (2 if parts else 0)
+            if remaining <= 0:
+                break
+            excerpt = item.chunk.content.strip()[:remaining]
+            if not excerpt:
+                continue
+            block = header + excerpt
+            used += len(block) + (2 if parts else 0)
             parts.append(block)
-            used += len(block)
         return "\n\n".join(parts)

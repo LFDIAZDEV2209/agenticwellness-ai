@@ -209,6 +209,25 @@ def service_query(text: str) -> bool:
     return _service_query(normalize(text))
 
 
+def patient_document_query(text: str) -> bool:
+    """Busca contenido del expediente; el listado y la apertura siguen por ID."""
+    normalized = _positive_text(text)
+    return bool(
+        re.search(
+            r"\b((mi|mis|my) (documentos?|archivos?|expediente|examen|informe|"
+            r"(?:uploaded )?(?:documents?|files?|report|exam|chart))|"
+            r"(documento|archivo|examen|informe) que (subi|cargue)|"
+            r"(document|file|report|exam) i uploaded)\b",
+            normalized,
+        )
+        and re.search(
+            r"\b(segun|dice|dicen|contenido|resume|resumen|menciona|say|says|according|"
+            r"contents?|summari[sz]e|mention)\b",
+            normalized,
+        )
+    )
+
+
 def patient_record_query(text: str) -> bool:
     """Abre el catálogo de lecturas si se pide un dato personal de la ficha."""
     text = _positive_text(text)

@@ -106,12 +106,28 @@ class KnowledgeChunk(Base):
     __table_args__ = (
         Index("ix_knowledge_chunks_knowledge_base_id", "knowledge_base_id"),
         Index("ix_knowledge_chunks_document_id", "document_id"),
+        Index(
+            "ix_knowledge_chunks_patient_status",
+            "patient_id",
+            "retrieval_status",
+            postgresql_where=text("patient_id IS NOT NULL"),
+        ),
+        CheckConstraint(
+            "(knowledge_base_id IS NULL) <> (patient_id IS NULL)",
+            name="ck_knowledge_chunks_scope",
+        ),
+        CheckConstraint(
+            "retrieval_status IN ('active', 'archived', 'deleted', 'disabled')",
+            name="ck_knowledge_chunks_retrieval_status",
+        ),
         {"schema": SCHEMA},
     )
 
     id: Mapped[str] = _uuid()
     document_id: Mapped[str] = mapped_column(String(36), nullable=False)
-    knowledge_base_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    knowledge_base_id: Mapped[str | None] = mapped_column(String(36))
+    patient_id: Mapped[str | None] = mapped_column(Uuid(as_uuid=False))
+    retrieval_status: Mapped[str] = mapped_column(String(16), server_default=text("'active'"))
     content: Mapped[str] = mapped_column(Text, nullable=False)
     embedding: Mapped[list[float]] = mapped_column(Vector(EMBEDDING_DIMENSIONS), nullable=False)
     extra: Mapped[dict | None] = mapped_column("metadata", JSON)

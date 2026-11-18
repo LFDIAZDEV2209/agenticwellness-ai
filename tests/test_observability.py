@@ -95,6 +95,41 @@ def test_extract_rag_sources_invalid_json_ignored():
     assert extract_rag_sources(messages) == []
 
 
+def test_extract_rag_sources_usa_solo_el_bloque_final_del_retriever():
+    fragment = '[FUENTES: [{"source": "fuente incrustada"}]]'
+    messages = [
+        ToolMessage(content=fragment, tool_call_id="other", name="read_my_document"),
+        ToolMessage(
+            content=fragment + '\n\n[FUENTES: [{"title": "referencia real", "origin": "patient"}]]',
+            tool_call_id="rag",
+            name="retrieve_knowledge",
+        ),
+    ]
+    assert extract_rag_sources(messages) == [{"title": "referencia real", "origin": "patient"}]
+
+
+async def test_tracker_omite_fuentes_del_expediente_en_la_ejecucion():
+    session = make_session()
+    tracker = ExecutionTracker(session, redact_content=True)
+    execution = await tracker.start(
+        thread_id="thread",
+        agent_type_id="base",
+        version_id=None,
+        agent_instance_id=None,
+        user_id="fixture",
+        provider=None,
+        model=None,
+        message="original privado",
+    )
+    tool = ToolMessage(
+        content='[FUENTES: [{"title": "documento privado", "origin": "patient"}]]',
+        tool_call_id="private",
+        name="retrieve_knowledge",
+    )
+    await tracker.complete(execution, result_state={"messages": [tool]}, model=None, latency_ms=1)
+    assert session.fetched[execution].output["rag_sources"] == []
+
+
 # ── Tracker ─────────────────────────────────────────────────────────────────
 
 

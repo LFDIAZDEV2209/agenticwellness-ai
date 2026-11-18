@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import time
 import uuid
 from datetime import UTC, datetime
@@ -40,9 +39,8 @@ logger = logging.getLogger(__name__)
 
 # Bloque que la tool de retrieval inyecta al final de su resultado:
 #   [FUENTES: [{"source": ..., "heading": ..., "score": ...}]]
-# Estructura: `[FUENTES: ` + array JSON `[...]` + `]` del bloque = termina en `}]]`.
-# El grupo captura el array completo (greedy) dejando la `]` final del bloque.
-_FUENTES_RE = re.compile(r"\[FUENTES:\s*(\[.*\])\]", re.DOTALL)
+# El bloque final envuelve el array JSON en `[FUENTES: ...]`.
+_SOURCE_MARKER = "[FUENTES: "
 
 _STATUS_RUNNING = "ejecutando"
 _STATUS_OK = "completado"
@@ -58,14 +56,24 @@ def extract_rag_sources(messages: list) -> list[dict]:
     """
     sources: list[dict] = []
     for msg in messages:
-        if not isinstance(msg, ToolMessage):
+        if (
+            not isinstance(msg, ToolMessage)
+            or msg.name != "retrieve_knowledge"
+            or msg.status == "error"
+        ):
             continue
         content = getattr(msg, "content", "")
         if not isinstance(content, str):
             continue
-        for match in _FUENTES_RE.finditer(content):
+        content = content.rstrip()
+        _, marker, tail = content.rpartition("\n\n" + _SOURCE_MARKER)
+        if not marker:
+            if not content.startswith(_SOURCE_MARKER):
+                continue
+            tail = content[len(_SOURCE_MARKER) :]
+        if tail.endswith("]"):
             try:
-                parsed = json.loads(match.group(1))
+                parsed = json.loads(tail[:-1])
                 if isinstance(parsed, list):
                     sources.extend(item for item in parsed if isinstance(item, dict))
             except (json.JSONDecodeError, TypeError):
@@ -172,7 +180,11 @@ class ExecutionTracker:
         output: dict = {
             "answer": None if self._redact_content else answer or None,
             "tools_used": result_state.get("tools_used", []),
-            "rag_sources": extract_rag_sources(messages),
+            "rag_sources": [
+                source
+                for source in extract_rag_sources(messages)
+                if source.get("origin") != "patient"
+            ],
             "suggestions": result_state.get("suggestions", []),
             "provider": result_state.get("provider") or model,
             "model": model or result_state.get("provider"),

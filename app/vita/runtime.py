@@ -15,7 +15,7 @@ from app.core.config import get_settings
 from app.graph.graph import build_graph
 from app.llm.factory import get_chat_model
 from app.tools.registry import TOOLS_BY_NAME, legacy_tools
-from app.tools.retrieval import make_retrieve_tool
+from app.tools.retrieval import authorized_patient_id, make_retrieve_tool
 from app.tools.vita import VITA_READ_TOOL_NAMES, VITA_RECORD_TOOL_NAMES
 from app.vita.client import VitaAccessError, read_catalog
 from app.vita.locking import LockedGraph
@@ -23,6 +23,7 @@ from app.vita.routing import (
     AuthorizedAgent,
     capability_scope,
     documentation_query,
+    patient_document_query,
     patient_record_query,
     select_agent,
     service_query,
@@ -101,23 +102,37 @@ async def resolve_turn(
     service = service_query(text)
     scope = capability_scope(text)
     documentation = documentation_query(text)
+    private_query = patient_document_query(text)
+    configurable = config["configurable"]
+    allow_patient_rag = (
+        channel in {"text", "voice"}
+        and configurable.get("user_id") == user_id
+        and authorized_patient_id(configurable) is not None
+    )
+    patient_retrieval = not service and private_query and allow_patient_rag
     record_followup = (
         not scope
         and not documentation
         and VITA_RECORD_TOOL_NAMES.intersection(previous_state.get("tools_used", ()))
     )
-    plan_record = not service and (patient_record_query(text) or bool(record_followup))
-    if plan_record:
+    plan_record = (
+        not service
+        and not patient_retrieval
+        and (patient_record_query(text) or bool(record_followup))
+    )
+    if plan_record or patient_retrieval:
         scope = None
-    direct_read = not plan_record and capability_scope(text, unambiguous=True) is not None
-    ground = not service and (documentation or (scope is None and not plan_record))
+    direct_read = scope is not None and capability_scope(text, unambiguous=True) is not None
+    ground = (
+        not service and not private_query and (documentation or (scope is None and not plan_record))
+    )
     decision = await select_agent(
         text,
         catalog,
         explicit=explicit,
         previous=previous,
         channel=channel,
-        classifier=None if scope or plan_record else classify,
+        classifier=None if scope or plan_record or private_query else classify,
     )
     if decision.agent is not None:
         agent = decision.agent
@@ -137,6 +152,8 @@ async def resolve_turn(
             plan_record=plan_record,
             ground_knowledge=ground,
             global_knowledge_base_ids=global_ids,
+            allow_patient_rag=allow_patient_rag,
+            patient_retrieval=patient_retrieval,
         )
         cfg = compiled.runtime_config
         return ResolvedTurn(
@@ -163,11 +180,13 @@ async def resolve_turn(
     # activas, nunca documentos de un especialista que no fue seleccionado.
     prepare = [f"get_my_{scope}"] if scope else []
     # Los saludos y ayudas de servicio permanecen inmediatos y sin RAG.
-    if ground:
-        ids = await resolve_knowledge_base_ids(session, "base", [])
-        if ids:
-            tools.append(make_retrieve_tool(knowledge_base_ids=ids))
-            prepare.append("retrieve_knowledge")
+    ids = await resolve_knowledge_base_ids(session, "base", []) if ground else []
+    if allow_patient_rag:
+        tools.append(make_retrieve_tool(knowledge_base_ids=ids, allow_patient=True))
+    elif ids:
+        tools.append(make_retrieve_tool(knowledge_base_ids=ids))
+    if ids or patient_retrieval:
+        prepare.append("retrieve_knowledge")
     graph = build_graph(
         model=get_chat_model(temperature=None),
         checkpointer=base_graph.checkpointer,
@@ -178,6 +197,7 @@ async def resolve_turn(
         and (direct_read or channel == "voice" or "retrieve_knowledge" in prepare)
         else None,
         final_after_tools=plan_record and channel == "voice",
+        retrieval_scope="patient" if patient_retrieval else "program",
     )
     return ResolvedTurn(
         LockedGraph(graph, "capability" if scope else decision.reason),
