@@ -38,6 +38,11 @@ if sys.platform == "win32":
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     setup_logging()
+    # Fallo rápido: una tool que no convierte al esquema del proveedor tumba el
+    # arranque (el deploy no pasa health check) en lugar de un 500 por turno.
+    from app.tools.catalog import validate_tool_catalog
+
+    validate_tool_catalog()
     settings = get_settings()
     if settings.auto_migrate and settings.database_url:
         from app.db.engine import run_db_migrations

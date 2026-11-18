@@ -23,3 +23,7 @@ class ToolExecutionError(CoppAiError):
 
 class MemoryStoreError(CoppAiError):
     """Error en la capa de memoria/persistencia."""
+
+
+class ToolCatalogError(CoppAiError):
+    """Una tool registrada no convierte al esquema nativo del proveedor LLM."""

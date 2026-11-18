@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 
@@ -31,8 +32,16 @@ from app.graph.state import AgentState
 from app.memory.adaptive import AdaptiveMemoryService
 from app.memory.service import UserMemoryService
 from app.safety.guardrails import check_input_guardrails
+from app.tools.catalog import conversion_failures, tool_label
 from app.tools.registry import TOOLS_BY_NAME, legacy_tools, patient_tools
 from app.vita.routing import service_query
+
+logger = logging.getLogger(__name__)
+
+# Código estable que viaja en `additional_kwargs` cuando el turno no puede
+# enlazar sus tools: el canal (chat, voz, WhatsApp) recibe un texto seguro y
+# el backend puede distinguirlo de una respuesta normal sin parsear el texto.
+TOOL_CATALOG_ERROR_CODE = "tool_catalog_unavailable"
 
 
 def guardrails_node(state: AgentState) -> dict:
@@ -186,6 +195,53 @@ def _active_tools(tools: list[BaseTool] | None, profile: AgentProfile | None) ->
     return patient_tools([*resolved, *(profile.extra_tools if profile else ())])
 
 
+def _tool_catalog_failure(
+    state: AgentState,
+    configurable: dict,
+    profile: AgentProfile | None,
+    tools: list[BaseTool] | None,
+    model: BaseChatModel,
+    exc: Exception,
+) -> dict:
+    """Respuesta controlada cuando las tools del turno no se pueden enlazar."""
+    declared = list(profile.tools if profile and profile.tools else (tools or []))
+    extra = list(profile.extra_tools) if profile else []
+    culprits = conversion_failures([*declared, *extra])
+    logger.error(
+        "Catálogo de tools no enlazable: perfil=%s canal=%s tools=%s culpables=%s error=%s",
+        profile.key if profile else "default",
+        configurable.get("message_channel", "text"),
+        [tool_label(item) for item in [*declared, *extra]],
+        culprits or ["(resolución del perfil)"],
+        type(exc).__name__,
+    )
+    language = detect_turn_language(state) or configurable.get("language")
+    response = AIMessage(
+        content=(
+            "The assistant is temporarily unavailable. Please try again in a few minutes."
+            if language == "en"
+            else "El asistente no está disponible en este momento. "
+            "Inténtalo de nuevo en unos minutos."
+        ),
+        additional_kwargs={
+            "channel": configurable.get("message_channel", "text"),
+            "status": "final",
+            "error_code": TOOL_CATALOG_ERROR_CODE,
+        },
+    )
+    if configurable.get("execution_id"):
+        response.additional_kwargs["execution_id"] = configurable["execution_id"]
+    if configurable.get("assistant_message_id"):
+        response.id = configurable["assistant_message_id"]
+    agent = profile.key if profile else state.get("agent", "base")
+    return {
+        "messages": [response],
+        "provider": model.__class__.__name__,
+        "agent": agent,
+        "context_agent": agent,
+    }
+
+
 def make_agent_node(
     model: BaseChatModel,
     system_prompt: str = BASE_SYSTEM_PROMPT,
@@ -213,8 +269,18 @@ def make_agent_node(
         # Resolución del perfil activo: el precedente gana sobre el default.
         profile = await profile_resolver(state) if profile_resolver else None
         active_prompt = profile.system_prompt if profile else system_prompt
-        active_tools = [] if state.get("tool_budget_exhausted") else _active_tools(tools, profile)
-        active_model = model.bind_tools(active_tools) if active_tools else model
+        configurable = get_config().get("configurable", {})
+        try:
+            active_tools = (
+                [] if state.get("tool_budget_exhausted") else _active_tools(tools, profile)
+            )
+            active_model = model.bind_tools(active_tools) if active_tools else model
+        except Exception as exc:
+            # Guarda de catálogo: una tool que no resuelve/convierte nunca debe
+            # producir un 500 ni silencio en el canal. Se registra solo metadata
+            # técnica (perfil, canal, nombres de tools); jamás el mensaje del
+            # paciente ni datos clínicos. El test de catálogo debe atraparlo antes.
+            return _tool_catalog_failure(state, configurable, profile, tools, model, exc)
 
         history = completed_tool_history(list(state.get("messages", [])))
         # Los resultados anteriores pueden haberse revocado/archivado. Solo las
@@ -268,7 +334,6 @@ def make_agent_node(
         # SOLO cuando el backend la envía. Viaja por `configurable` (no por
         # state) para que nunca persista en el checkpointer entre turnos: un
         # turno sin contexto no debe heredar la guía del turno anterior.
-        configurable = get_config().get("configurable", {})
         control_context = configurable.get("control_context")
         if control_context:
             system_blocks.append(
