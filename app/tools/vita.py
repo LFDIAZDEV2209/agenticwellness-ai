@@ -4,17 +4,32 @@ from langchain_core.tools import StructuredTool
 from langgraph.config import get_config
 from pydantic import ValidationError
 
-from app.vita.client import read_context, read_record
+from app.vita.client import INVALID_DOCUMENT_ARGUMENTS, read_context, read_document, read_record
 from app.vita.contracts import (
+    INVALID_NUTRITION_DATE,
     INVALID_VITALS_RANGE,
     ContextEnvelope,
+    DocumentListArguments,
+    DocumentReadArguments,
     EmptyArguments,
+    NutritionArguments,
+    RecordReadResult,
     RecordResource,
     Scope,
     VitalsArguments,
 )
 
-VITA_RECORD_TOOL_NAMES = frozenset({"get_my_profile", "get_my_vitals", "get_my_medications"})
+VITA_RECORD_TOOL_NAMES = frozenset(
+    {
+        "get_my_profile",
+        "get_my_vitals",
+        "get_my_medications",
+        "get_my_nutrition_plan",
+        "get_my_assessment_results",
+        "list_my_documents",
+        "read_my_document",
+    }
+)
 
 VITA_READ_TOOL_NAMES = VITA_RECORD_TOOL_NAMES | frozenset(
     {
@@ -78,28 +93,31 @@ get_my_progress = make_context_tool(
 )
 
 
-def _make_record_tool(resource: RecordResource, description: str) -> StructuredTool:
-    async def read() -> str:
+def _make_record_tool(
+    resource: RecordResource,
+    description: str,
+    *,
+    name: str | None = None,
+    schema: type[VitalsArguments | NutritionArguments | DocumentListArguments] | None = None,
+    invalid: RecordReadResult | None = None,
+) -> StructuredTool:
+    async def read(**arguments: object) -> str:
+        try:
+            parsed = schema.model_validate(arguments) if schema else None
+        except ValidationError:
+            assert invalid is not None
+            return invalid.to_tool_json()
         user_id = get_config().get("configurable", {}).get("user_id")
-        result = await read_record(resource, user_id)
+        result = await read_record(resource, user_id, arguments=parsed)
         return result.to_tool_json()
 
     return StructuredTool.from_function(
         coroutine=read,
-        name=f"get_my_{resource}",
+        name=name or f"get_my_{resource}",
         description=description,
-        args_schema=EmptyArguments,
+        # JSON Schema conserva los nombres del contrato en ambos proveedores.
+        args_schema=schema.model_json_schema() if schema else EmptyArguments,
     )
-
-
-async def _read_vitals(**arguments: object) -> str:
-    try:
-        dates = VitalsArguments.model_validate(arguments)
-    except ValidationError:
-        return INVALID_VITALS_RANGE.to_tool_json()
-    user_id = get_config().get("configurable", {}).get("user_id")
-    result = await read_record("vitals", user_id, dates=dates)
-    return result.to_tool_json()
 
 
 get_my_profile = _make_record_tool(
@@ -107,21 +125,64 @@ get_my_profile = _make_record_tool(
     "Lee mi perfil activo, edad, metas registradas, alergias, restricciones y el historial "
     "de peso, talla e IMC / Read my profile, goals, allergies, restrictions and anthropometry.",
 )
-get_my_vitals = StructuredTool.from_function(
-    coroutine=_read_vitals,
-    name="get_my_vitals",
-    description=(
+get_my_vitals = _make_record_tool(
+    "vitals",
+    (
         "Lee mis últimos signos vitales y su historial con unidad, fecha y origen / Read my "
         "recorded vital signs and biometrics. Intervalo local inclusivo de hasta 31 días; "
         "por defecto el backend devuelve los últimos siete días. Si la fecha solicitada es "
         "relativa y no conoces el día local, usa el rango por defecto y las fechas de la respuesta."
     ),
-    # Publicar JSON Schema conserva el alias `from` en ambos proveedores.
-    # _read_vitals valida la entrada contra el mismo modelo Pydantic.
-    args_schema=VitalsArguments.model_json_schema(),
+    schema=VitalsArguments,
+    invalid=INVALID_VITALS_RANGE,
 )
 get_my_medications = _make_record_tool(
     "medications",
     "Lee mis tratamientos vigentes, medicamentos y suplementos, dosis, horarios y tomas "
     "del día / Read my current treatments and today's recorded dose status.",
 )
+
+get_my_nutrition_plan = _make_record_tool(
+    "nutrition",
+    "Lee mi ciclo nutricional publicado de hasta 30 días, recomendaciones visibles e historial "
+    "de comidas registradas. Usa date local YYYY-MM-DD solo cuando se solicita otra fecha.",
+    name="get_my_nutrition_plan",
+    schema=NutritionArguments,
+    invalid=INVALID_NUTRITION_DATE,
+)
+get_my_assessment_results = _make_record_tool(
+    "assessments",
+    "Lee mis baterías y resultados completados visibles, con puntajes e interpretaciones "
+    "registradas. Para pendientes o en curso devuelve solo estado y metadatos.",
+    name="get_my_assessment_results",
+)
+list_my_documents = _make_record_tool(
+    "documents",
+    "Lista mis documentos de expediente con ID, nombre, tipo, fecha y estado. Usa page y "
+    "pageSize si necesitas otra página. Para consultar el texto usa read_my_document con el ID.",
+    name="list_my_documents",
+    schema=DocumentListArguments,
+    invalid=INVALID_DOCUMENT_ARGUMENTS,
+)
+
+
+async def _read_document(**arguments: object) -> str:
+    try:
+        parsed = DocumentReadArguments.model_validate(arguments)
+    except ValidationError:
+        return INVALID_DOCUMENT_ARGUMENTS.to_tool_json()
+    user_id = get_config().get("configurable", {}).get("user_id")
+    return (await read_document(user_id, parsed.id)).to_tool_json()
+
+
+read_my_document = StructuredTool.from_function(
+    coroutine=_read_document,
+    name="read_my_document",
+    description="Lee el texto extraíble de un documento propio usando el ID de list_my_documents.",
+    args_schema=DocumentReadArguments.model_json_schema(),
+)
+
+VITA_TOOL_ARGUMENTS = {
+    tool.name: frozenset(tool.args_schema["properties"])
+    for tool in (get_my_vitals, get_my_nutrition_plan, list_my_documents, read_my_document)
+}

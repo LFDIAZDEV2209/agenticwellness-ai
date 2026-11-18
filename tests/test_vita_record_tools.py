@@ -18,7 +18,7 @@ from app.graph.graph import build_graph
 from app.observability.turn_trace import TurnTraceCollector, attach_collector
 from app.tools.catalog import PROVIDER_CONVERTERS
 from app.tools.registry import TOOLS_BY_NAME
-from app.tools.vita import VITA_RECORD_TOOL_NAMES
+from app.tools.vita import VITA_RECORD_TOOL_NAMES, VITA_TOOL_ARGUMENTS
 from app.vita import client, runtime
 from tests.fakes import RecordingFakeModel
 from tests.test_runtime_registry import AGENT_ID, VERSION_ID, make_session_with_row
@@ -153,7 +153,10 @@ def graph_config(channel="text", user=OWNER):
 
 
 async def invoke(resource, args=None, *, config=None):
-    name = f"get_my_{resource}"
+    return await invoke_tool(f"get_my_{resource}", args, config=config)
+
+
+async def invoke_tool(name, args=None, *, config=None):
     graph = build_graph(
         model=scripted_tool(name, args or {}),
         tools=[TOOLS_BY_NAME[name]],
@@ -175,9 +178,9 @@ def test_schema_y_descripcion_convertibles(name, provider):
     public = schema["function"] if provider == "openai" else schema
     args = public["parameters"] if provider == "openai" else public["input_schema"]
     assert public["description"] == tool.description and len(tool.description) > 50
-    expected = {"from", "to"} if name == "get_my_vitals" else set()
+    expected = VITA_TOOL_ARGUMENTS.get(name, set())
     assert set(args.get("properties", {})) == expected
-    assert not args.get("required")
+    assert args.get("required", []) == (["id"] if name == "read_my_document" else [])
     native = (
         tool.args_schema
         if isinstance(tool.args_schema, dict)
@@ -205,6 +208,8 @@ async def test_dto_del_contrato(resource, payload, expected_status, backend):
 
     serve(reply)
     result = await invoke(resource)
+    if resource == "medications" and expected_status == "empty":
+        assert result.pop("message") == "No hay tratamientos vigentes."
     assert result == {"status": expected_status, "data": payload}
     (request,) = requests
     assert request.method == "GET"

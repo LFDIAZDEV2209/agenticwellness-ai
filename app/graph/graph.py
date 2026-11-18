@@ -13,11 +13,12 @@ cuando exista la lógica de negocio (ver app/orchestration/router.py).
 
 from __future__ import annotations
 
+from itertools import takewhile
 from typing import Any
 from uuid import uuid4
 
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import BaseTool
 from langgraph.graph import END, START, StateGraph
 
@@ -51,6 +52,22 @@ def _make_route_after_agent(enable_memory: bool) -> Any:
         return "memory_save" if enable_memory else END
 
     return _route_after_agent
+
+
+def _route_after_tools(state: AgentState, *, voice_answer: bool) -> str:
+    messages = state["messages"]
+    if isinstance(messages[-1], AIMessage):
+        return END
+    if not voice_answer:
+        return "agent"
+    latest = takewhile(lambda message: isinstance(message, ToolMessage), reversed(messages))
+    # La lista devuelve IDs autorizados. El modelo puede usar uno para leer el
+    # documento dentro del mismo turno, antes de comenzar el audio final.
+    if not state.get("tool_budget_exhausted") and any(
+        message.name == "list_my_documents" and message.status != "error" for message in latest
+    ):
+        return "agent"
+    return "answer"
 
 
 def build_graph(
@@ -135,16 +152,17 @@ def build_graph(
         if enable_memory
         else {"tools": "tools", END: END},
     )
-    after_tools = "answer" if final_after_tools else "agent"
+    tool_routes = {END: END, "agent": "agent"}
     if final_after_tools:
         workflow.add_node(
             "answer", make_agent_node(model, system_prompt, tools=[], final_response=True)
         )
         workflow.add_edge("answer", "memory_save" if enable_memory else END)
+        tool_routes["answer"] = "answer"
     workflow.add_conditional_edges(
         "tools",
-        lambda state: END if isinstance(state["messages"][-1], AIMessage) else after_tools,
-        {END: END, after_tools: after_tools},
+        lambda state: _route_after_tools(state, voice_answer=final_after_tools),
+        tool_routes,
     )
     if enable_memory:
         workflow.add_edge("memory_save", END)

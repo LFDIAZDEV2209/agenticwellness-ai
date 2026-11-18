@@ -52,6 +52,10 @@ pueden usar estas lecturas cuando el turno pide datos personales.
 | `get_my_profile` | `/profile` | Perfil, edad, metas vigentes, alergias, restricciones y antropometría con historial. |
 | `get_my_vitals` | `/vitals` | Última lectura por métrica e historial con fecha, unidad y origen. Admite `from` y `to` locales, hasta 31 días inclusivos. El backend resuelve los extremos omitidos. |
 | `get_my_medications` | `/medications` | Tratamientos vigentes, dosis, horarios y estados de las tomas del día. |
+| `get_my_nutrition_plan` | `/nutrition` | Ciclo publicado de hasta 30 días, recomendaciones visibles e historial de comidas. `date` permite consultar otra fecha local. |
+| `get_my_assessment_results` | `/assessments` | Puntajes e interpretaciones autorizadas de evaluaciones completadas. Las baterías pendientes o en curso aportan estado y metadatos. |
+| `list_my_documents` | `/documents` | Nombre, tipo, fecha y estado del expediente, con paginación por `page` y `pageSize`. |
+| `read_my_document` | `/documents/{id}` | Extracto de texto de un documento propio, seleccionado por su ID. |
 
 Un saludo no prepara lecturas. En voz, la selección para consultas de ficha puede
 añadir una invocación al modelo. La respuesta al paciente se genera después de la
@@ -64,6 +68,22 @@ consentimiento pendiente (403), módulo apagado (404), consentimiento no verific
 (503) y timeout. La cancelación del turno interrumpe la lectura HTTP. Los detalles
 del backend quedan fuera de la respuesta de error y de las trazas técnicas.
 [Cliente HTTP](../app/vita/client.py) · [Pruebas de contrato y runtime](../tests/test_vita_record_tools.py)
+
+Para documentos, la firma de 120 s se consume dentro del servicio y queda fuera del
+resultado de la tool. Se admiten enlaces relativos a `/api/v1/storage/` del backend
+y el origen HTTPS de `VITA_DOCUMENT_STORAGE_ORIGIN`, que por defecto apunta al
+bucket de producción. La descarga va sin `X-Internal-Key` y sin redirecciones.
+La descarga y la extracción tienen un plazo conjunto con la consulta de metadatos.
+El proceso se detiene al cancelar el turno, limita el archivo a 5 MiB y devuelve
+hasta 6.000 caracteres. Admite texto y PDF con texto extraíble. Un documento
+escaneado o un formato sin extracción devuelve un mensaje de indisponibilidad.
+En voz, el modelo puede listar y luego leer en el mismo turno antes de hablar.
+[Descarga y extracción](../app/vita/document_download.py) · [Pruebas de ausencia y descarga](../tests/test_vita_extended_reads.py)
+
+La suite de aislamiento usa dos identidades con el mismo ID de hilo visible,
+lecturas distintas y memoria y trazas en PostgreSQL. Incluye una prueba de
+control que omite el filtro de propietario de memoria y comprueba que la
+aserción detecta la fuga. [Pruebas de aislamiento](../tests/test_vita_patient_isolation_postgres.py)
 
 ## Event log
 

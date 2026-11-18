@@ -38,6 +38,7 @@ from app.safety.guardrails import check_input_guardrails
 from app.tools.catalog import conversion_failures, tool_label
 from app.tools.policy import TOOL_SPECS, filter_for_channel, resolve_channel, spec_for
 from app.tools.registry import TOOLS_BY_NAME, legacy_tools, patient_tools
+from app.tools.vita import VITA_TOOL_ARGUMENTS
 from app.vita.context_builder import ContextBudget, build_context
 from app.vita.routing import service_query
 
@@ -658,12 +659,11 @@ def make_tools_node(
         # aunque el modelo la pida (p. ej. argumentos/tool_calls manipulados).
         selected = filter_for_channel(_active_tools(tools, profile), channel)
         allowed = {tool.name for tool in selected}
-        # La única excepción al esquema personal vacío es el rango de vitales.
-        # Cualquier selector u otro argumento sigue bloqueado antes de ejecutar.
-        personal_arguments = {"get_my_vitals": {"from", "to"}}
+        # Solo se admiten los campos públicos del esquema. Los selectores de
+        # paciente siguen excluidos de cualquier lectura.
         invalid_arguments = any(
-            call["name"].startswith("get_my_")
-            and set(call.get("args", {})).difference(personal_arguments.get(call["name"], ()))
+            (call["name"].startswith("get_my_") or call["name"] in VITA_TOOL_ARGUMENTS)
+            and set(call.get("args", {})).difference(VITA_TOOL_ARGUMENTS.get(call["name"], ()))
             for call in calls
         )
         blocked = (

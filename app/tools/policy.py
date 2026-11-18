@@ -83,6 +83,10 @@ TOOL_SPECS: Mapping[str, ToolSpec] = {
         _read("get_my_profile", APP_CHANNELS),
         _read("get_my_vitals", APP_CHANNELS),
         _read("get_my_medications", APP_CHANNELS),
+        _read("get_my_nutrition_plan", APP_CHANNELS),
+        _read("get_my_assessment_results", APP_CHANNELS),
+        _read("list_my_documents", APP_CHANNELS),
+        ToolSpec("read_my_document", APP_CHANNELS, max_calls_per_turn=1, deadline_seconds=8),
     )
 }
 

@@ -83,6 +83,9 @@ class Settings(BaseSettings):
     backend_base_url: str = ""
     vita_runtime_enabled: bool = False
     vita_http_timeout: float = Field(default=3, gt=0, le=8)
+    vita_document_storage_origin: str = (
+        "https://cooppadresd-storage-prod.s3.us-east-2.amazonaws.com"
+    )
     vita_turn_timeout: float = Field(default=20, gt=0, le=90)
     # Harness Vita (Ola A): event log append-only por turno y presupuesto de
     # contexto. El log es best-effort; desactivarlo no afecta al turno.

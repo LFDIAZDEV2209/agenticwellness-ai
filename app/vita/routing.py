@@ -220,7 +220,11 @@ def patient_record_query(text: str) -> bool:
             r"signos vitales|vitals?|biometria|biometrics|presion|tension arterial|blood pressure|"
             r"pulso|heart rate|glucosa|glucose|blood sugar|saturacion|oxygen|temperatura|"
             r"temperature|grasa corporal|body fat|sueno|sleep|medicamentos?|medicacion|"
-            r"meds|medications?|tratamientos?|treatments?|dosis|doses?|suplementos?|supplements?)\b",
+            r"meds|medications?|tratamientos?|treatments?|dosis|doses?|suplementos?|supplements?|"
+            r"expediente|documentos?|documents?|archivos?|files?|baterias?|batteries|"
+            r"resultados?|scores?|ciclo nutricional|nutrition cycle|recomendaciones|"
+            r"recommendations|historial de comidas|meal history|plan completo|full meal plan|"
+            r"plan de 30 dias|30.day plan)\b",
             text,
         )
         and re.search(

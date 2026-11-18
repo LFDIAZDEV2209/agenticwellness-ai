@@ -8,9 +8,12 @@ from uuid import UUID
 from pydantic import (
     AwareDatetime,
     BaseModel,
+    BeforeValidator,
     ConfigDict,
     Field,
+    SecretStr,
     StrictInt,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
@@ -70,7 +73,9 @@ class VitalsArguments(EmptyArguments):
         return self
 
 
-RecordResource = Literal["profile", "vitals", "medications"]
+RecordResource = Literal[
+    "profile", "vitals", "medications", "nutrition", "assessments", "documents"
+]
 MeasurementSource = Literal["device", "patient", "professional", "lab"]
 JsonNumber = StrictInt | Annotated[float, Field(strict=True, allow_inf_nan=False)]
 
@@ -166,11 +171,163 @@ class MedicationsRecord(RecordDto):
     treatments: list[Treatment]
 
 
+class NutritionArguments(EmptyArguments):
+    on_date: Annotated[date, BeforeValidator(VitalsArguments.local_calendar_date)] | None = Field(
+        default=None,
+        alias="date",
+        description="Fecha local YYYY-MM-DD. El backend usa hoy si se omite.",
+    )
+
+
+class NutritionMeal(RecordDto):
+    meal_type: str
+    description: str | None
+    foods: str | None
+    calories: StrictInt | None
+    protein_g: JsonNumber | None
+    carbs_g: JsonNumber | None
+    fat_g: JsonNumber | None
+    fiber_g: JsonNumber | None
+    water_ml: StrictInt | None
+    notes: str | None
+    sort_order: StrictInt
+    suggested_time: str | None
+    notes_en: str | None
+
+
+class NutritionDay(RecordDto):
+    date: date
+    status: Literal["planned", "unavailable"]
+    meals: list[NutritionMeal]
+
+
+class NutritionPlan(RecordDto):
+    id: UUID
+    revision: StrictInt | None
+    start_date: date
+    end_date: date
+    days: list[NutritionDay] = Field(max_length=30)
+
+
+class NutritionRecommendation(RecordDto):
+    cycle_number: StrictInt
+    published_at: AwareDatetime
+    patient_message: str
+
+
+class NutritionIntake(RecordDto):
+    date: date
+    meal_code: str
+    calories: JsonNumber | None
+    protein_g: JsonNumber | None
+    carbs_g: JsonNumber | None
+    fat_g: JsonNumber | None
+    fiber_g: JsonNumber | None
+    water_ml: StrictInt | None
+    source: str
+
+
+class NutritionRecord(RecordDto):
+    date: date
+    plan: NutritionPlan | None
+    recommendations: list[NutritionRecommendation] = Field(max_length=12)
+    history: list[NutritionIntake]
+
+
+class AssessmentResult(RecordDto):
+    result_type: str
+    code: str
+    label: str
+    value: JsonNumber
+    qualifier: str | None
+    severity: str | None
+
+    @model_validator(mode="after")
+    def keep_subscale_scores(self) -> Self:
+        if self.result_type == "subscale":
+            self.qualifier = self.severity = None
+        return self
+
+
+class AssessmentTest(RecordDto):
+    test_name: str
+    test_code: str
+    completed_at: AwareDatetime
+    score: JsonNumber | None
+    score_percentage: JsonNumber | None
+    results: list[AssessmentResult]
+
+
+class AssessmentBattery(RecordDto):
+    id: UUID
+    name: str
+    status: Literal["pending", "in_progress", "completed"]
+    due_date: AwareDatetime | None
+    completed_at: AwareDatetime | None
+    tests: list[AssessmentTest]
+
+    @field_validator("tests", mode="before")
+    @classmethod
+    def only_completed_tests(cls, value: object, info: ValidationInfo) -> object:
+        return value if info.data.get("status") == "completed" else []
+
+
+class AssessmentsRecord(RecordDto):
+    batteries: list[AssessmentBattery] = Field(max_length=20)
+
+
+class DocumentListArguments(EmptyArguments):
+    page: int = Field(default=1, strict=True, ge=1, le=10_000)
+    page_size: int = Field(default=20, alias="pageSize", strict=True, ge=1, le=50)
+
+
+class DocumentReadArguments(EmptyArguments):
+    id: UUID = Field(description="ID devuelto por list_my_documents para el documento solicitado.")
+
+
+class PatientDocument(RecordDto):
+    id: UUID
+    name: str
+    type: str
+    date: AwareDatetime
+    status: str
+
+
+class DocumentsRecord(RecordDto):
+    items: list[PatientDocument] = Field(max_length=50)
+    total: int = Field(strict=True, ge=0)
+    page: int = Field(strict=True, ge=1, le=10_000)
+    page_size: int = Field(strict=True, ge=1, le=50)
+
+
+class DocumentTicket(RecordDto):
+    """Capacidad efímera exclusiva del cliente HTTP."""
+
+    document: PatientDocument
+    url: SecretStr = Field(exclude=True, repr=False)
+    expires_in_seconds: Literal[120]
+
+
+class DocumentContent(RecordDto):
+    document: PatientDocument
+    text: str
+    truncated: bool
+
+
 class RecordReadResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     status: Literal["ok", "empty", "unavailable", "forbidden"]
-    data: ProfileRecord | VitalsRecord | MedicationsRecord | None = None
+    data: (
+        ProfileRecord
+        | VitalsRecord
+        | MedicationsRecord
+        | NutritionRecord
+        | AssessmentsRecord
+        | DocumentsRecord
+        | DocumentContent
+        | None
+    ) = None
     code: str | None = None
     message: str | None = None
 
@@ -183,4 +340,10 @@ INVALID_VITALS_RANGE = RecordReadResult(
     status="unavailable",
     code="invalid_date_range",
     message="Indica un intervalo válido de hasta 31 días en fechas locales.",
+)
+
+INVALID_NUTRITION_DATE = RecordReadResult(
+    status="unavailable",
+    code="invalid_nutrition_date",
+    message="Indica una fecha local válida que no esté en el futuro.",
 )
