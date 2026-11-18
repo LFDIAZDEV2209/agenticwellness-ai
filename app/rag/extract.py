@@ -81,7 +81,7 @@ def _extract_pdf(content: bytes) -> str:
         for page in reader.pages:
             pages.append(page.extract_text() or "")
     except Exception as exc:
-        logger.warning("Error parseando PDF: %s", exc)
+        logger.warning("Error parseando PDF: %s", type(exc).__name__)
         raise DocumentExtractionError(f"No se pudo extraer texto del PDF: {exc}") from exc
 
     text = "\n\n".join(pages).strip()

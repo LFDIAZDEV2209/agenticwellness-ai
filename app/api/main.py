@@ -21,6 +21,7 @@ from app.api.routes import (
     proactive,
     program_narrative,
     threads,
+    vita_documents,
     vita_voice,
     voice,
 )
@@ -97,6 +98,7 @@ def create_app() -> FastAPI:
     app.include_router(proactive.router)
     app.include_router(lab_exam.router)
     app.include_router(voice.router)
+    app.include_router(vita_documents.router)
     app.include_router(vita_voice.router)
     app.include_router(program_narrative.router)
     app.include_router(content_translation.router)

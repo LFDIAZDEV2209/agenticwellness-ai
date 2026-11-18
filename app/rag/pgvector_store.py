@@ -88,7 +88,7 @@ class PgVectorStore:
             vectors: embeddings por chunk (mismo orden).
             document_id: ID del documento de origen en su ámbito.
             knowledge_base_id: KB del programa.
-            patient_id: dueño canónico para el futuro indexador de expediente.
+            patient_id: dueño canónico del documento de expediente.
 
         Returns:
             Cantidad de chunks insertados.
@@ -197,6 +197,15 @@ class PgVectorStore:
         result = await self._session.execute(
             delete(KnowledgeChunk).where(
                 KnowledgeChunk.document_id == document_id, KnowledgeChunk.patient_id.is_(None)
+            )
+        )
+        return result.rowcount or 0
+
+    async def delete_patient_document(self, *, patient_id: str, document_id: str) -> int:
+        """Elimina únicamente los chunks privados del par paciente/documento."""
+        result = await self._session.execute(
+            delete(KnowledgeChunk).where(
+                KnowledgeChunk.patient_id == patient_id, KnowledgeChunk.document_id == document_id
             )
         )
         return result.rowcount or 0
