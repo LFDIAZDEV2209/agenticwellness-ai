@@ -84,6 +84,10 @@ class Settings(BaseSettings):
     vita_runtime_enabled: bool = False
     vita_http_timeout: float = Field(default=3, gt=0, le=8)
     vita_turn_timeout: float = Field(default=20, gt=0, le=90)
+    # Harness Vita (Ola A): event log append-only por turno y presupuesto de
+    # contexto. El log es best-effort; desactivarlo no afecta al turno.
+    vita_turn_log_enabled: bool = True
+    vita_context_token_budget: int = Field(default=12_000, ge=4_000, le=200_000)
     vita_voice_enabled: bool = False
     vita_transcript_sync_enabled: bool = False
     vita_transcript_sync_timeout: float = Field(default=5, gt=0, le=10)

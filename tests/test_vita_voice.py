@@ -505,6 +505,25 @@ async def test_changed_earlier_utterance_is_not_a_new_question(rig):
     assert len(rig.model.prompts) == 2
 
 
+async def test_voice_persiste_una_traza_y_replay_no_agrega_otra(rig, monkeypatch):
+    from app.api.routes import vita_voice
+
+    traces = []
+
+    async def capture(trace):
+        traces.append(trace)
+
+    monkeypatch.setattr(vita_voice, "persist_turn", capture)
+    first = await post(rig, body("Consulta de prueba"))
+    replay = await post(rig, body("Consulta de prueba"))
+    assert first.status_code == replay.status_code == 200
+    assert first.text.endswith("data: [DONE]\n\n")
+    (trace,) = traces
+    assert (trace.channel, trace.status, trace.thread_id) == ("voice", "completed", "owner::shared")
+    assert trace.message_ref and any(event.kind == "llm" for event in trace.events)
+    assert "Consulta de prueba" not in json.dumps(trace.to_log())
+
+
 @pytest.mark.parametrize("field", ["user_id", "userId", "patientId", "thread_id", "session_token"])
 async def test_body_cannot_change_signed_identity(rig, field):
     assert (await post(rig, body("Hola", **{field: "other"}))).status_code == 422

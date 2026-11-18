@@ -186,6 +186,7 @@ def _build_final_graph(
                 "messages": [
                     AIMessage(
                         content="",
+                        additional_kwargs={"vita_prepared": True},
                         tool_calls=[
                             {
                                 "name": name,

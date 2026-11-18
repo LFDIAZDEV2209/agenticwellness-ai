@@ -32,7 +32,14 @@ from app.core.logging import get_logger
 from app.history.service import history_service
 from app.memory.adaptive import AdaptiveMemoryService
 from app.observability.executions import ExecutionTracker
+from app.observability.turn_trace import (
+    TurnTraceCollector,
+    attach_collector,
+    error_code,
+    persist_turn,
+)
 from app.safety.guardrails import RateLimiter
+from app.tools.policy import resolve_channel
 from app.vita.locking import ThreadBusyError
 from app.voice.store import VoiceContextError
 
@@ -125,6 +132,7 @@ def _build_config(
     # Aislamiento multi-agente: el checkpointer y las tools separan el estado
     # por usuario/paciente/instancia además del thread.
     if request is not None:
+        configurable["message_channel"] = resolve_channel({}, request.agent)
         if request.user_id:
             configurable["user_id"] = request.user_id
         if request.patient_id:
@@ -158,6 +166,10 @@ def _is_vita_request(request: ChatRequest) -> bool:
 
 def _history_opt_in(request: ChatRequest) -> bool:
     return request.supports_vita and request.agent != "whatsapp"
+
+
+def _redact_execution(request: ChatRequest) -> bool:
+    return _history_opt_in(request) or request.agent == "whatsapp"
 
 
 async def _prepare_chat_history(request: ChatRequest, thread_id: str, graph):
@@ -283,6 +295,51 @@ def _log_execution_error(message: str, *, vita: bool) -> None:
         logger.exception(message)
 
 
+def _turn_collector(request: ChatRequest, thread_id: str, execution_id: str) -> TurnTraceCollector:
+    """Traza técnica del turno (sin contenido); el canal sale de la política única."""
+    return TurnTraceCollector(
+        thread_id=_storage_thread_id(request.user_id, thread_id),
+        channel=resolve_channel({}, request.agent),
+        patient_id=request.patient_id or request.user_id,
+        agent_id=request.agent_type_id or request.agent or "base",
+        execution_id=execution_id,
+    )
+
+
+def _turn_outcome(state: dict | None) -> tuple[str | None, str | None]:
+    """(message_ref, error_code) del último AIMessage del turno, si existe."""
+    state = state or {}
+    messages = state.get("messages", [])[state.get("turn_start_index", 0) :]
+    for message in reversed(messages):
+        if isinstance(message, AIMessage) and not message.tool_calls:
+            code = message.additional_kwargs.get("error_code")
+            if code not in ("tool_catalog_unavailable", "tool_budget_exceeded"):
+                code = None
+            return message.id, code
+    return None, None
+
+
+async def _close_turn(
+    collector: TurnTraceCollector,
+    *,
+    status: str,
+    error: str | None,
+    state: dict | None,
+    model: str | None,
+) -> None:
+    message_ref, state_error = _turn_outcome(state if status == "completed" else None)
+    if status == "completed" and (state or {}).get("guardrail", {}).get("safe") is False:
+        status, error = "rejected", "guardrail_rejected"
+    trace = collector.finish(
+        status=status,
+        error_code=error or state_error,
+        model=model,
+        message_ref=message_ref,
+        agent_id=(state or {}).get("agent"),
+    )
+    await persist_turn(trace)
+
+
 @router.post("", response_model=ChatResponse)
 async def chat(
     request: ChatRequest,
@@ -314,7 +371,7 @@ async def chat(
         graph = base_graph
     graph = _with_transcript_lock(graph, force=history_binding is not None)
 
-    tracker = ExecutionTracker(session, redact_content=_history_opt_in(request))
+    tracker = ExecutionTracker(session, redact_content=_redact_execution(request))
     execution_id = await tracker.start(
         thread_id=thread_id,
         agent_type_id=request.agent_type_id or request.agent or "base",
@@ -330,6 +387,9 @@ async def chat(
     if history_binding is not None:
         config["configurable"]["vita_history"] = history_binding
     config["configurable"]["execution_id"] = execution_id
+    collector = _turn_collector(request, thread_id, execution_id)
+    attach_collector(config, collector)
+    turn_status, turn_error, result = "failed", "exc_unknown", None
     try:
         result = await asyncio.wait_for(
             graph.ainvoke(
@@ -351,7 +411,9 @@ async def chat(
             model=model,
             latency_ms=int((time.perf_counter() - started) * 1000),
         )
+        turn_status, turn_error = "completed", None
     except asyncio.CancelledError:
+        turn_status, turn_error = "cancelled", "cancelled"
         await asyncio.shield(
             tracker.fail(
                 execution_id,
@@ -362,11 +424,13 @@ async def chat(
         await asyncio.shield(session.commit())
         raise
     except (VoiceContextError, ThreadBusyError) as exc:
+        turn_status, turn_error = "rejected", "history_turn_rejected"
         await tracker.fail(execution_id, error="history_turn_rejected", latency_ms=0)
         await session.commit()
         raise HTTPException(status_code=getattr(exc, "status", 409), detail=str(exc)) from exc
     except CoppAiError as exc:
-        _log_execution_error("Error ejecutando el grafo", vita=_history_opt_in(request))
+        turn_error = error_code(exc)
+        _log_execution_error("Error ejecutando el grafo", vita=_redact_execution(request))
         await tracker.fail(
             execution_id,
             error=str(exc),
@@ -375,7 +439,8 @@ async def chat(
         await session.commit()
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     except TimeoutError:
-        logger.error("Timeout del agente (thread=%s)", thread_id)
+        turn_error = "turn_timeout"
+        logger.error("Timeout del agente")
         await tracker.fail(
             execution_id,
             error="Timeout del agente",
@@ -386,11 +451,12 @@ async def chat(
             status_code=500, detail="No fue posible procesar la solicitud."
         ) from None
     except Exception as exc:
+        turn_error = error_code(exc)
         # Cualquier error no tipado (p. ej. fallo de la API del LLM) debe
         # actualizar el estado de la ejecución y devolver un mensaje seguro,
         # no dejar la execution en RUNNING para siempre.
         _log_execution_error(
-            "Error no controlado ejecutando el grafo", vita=_history_opt_in(request)
+            "Error no controlado ejecutando el grafo", vita=_redact_execution(request)
         )
         await tracker.fail(
             execution_id,
@@ -402,6 +468,11 @@ async def chat(
             status_code=500, detail="No fue posible procesar la solicitud."
         ) from exc
 
+    finally:
+        # Event log append-only: best-effort, nunca cambia la respuesta del canal.
+        await asyncio.shield(
+            _close_turn(collector, status=turn_status, error=turn_error, state=result, model=model)
+        )
     await session.commit()
 
     tools_used = list(result.get("tools_used", []))
@@ -505,7 +576,7 @@ async def chat_stream(
         graph = base_graph
     graph = _with_transcript_lock(graph, force=history_binding is not None)
 
-    tracker = ExecutionTracker(session, redact_content=_history_opt_in(request))
+    tracker = ExecutionTracker(session, redact_content=_redact_execution(request))
     execution_id = await tracker.start(
         thread_id=thread_id,
         agent_type_id=request.agent_type_id or request.agent or "base",
@@ -519,11 +590,12 @@ async def chat_stream(
 
     started = time.perf_counter()
     flow_trace: list[dict[str, object]] = []
+    collector = _turn_collector(request, thread_id, execution_id)
 
     async def event_generator():
-        yield "event: start\ndata: {}\n\n"
         final_state: dict | None = None
         error: str | None = None
+        turn_status, turn_error = "cancelled", "stream_interrupted"
         # Trazabilidad de nodos para la visualización de flujos en vivo:
         # `stream_mode="tasks"` emite inicio (trae `triggers`) y fin (trae
         # `result`) de cada nodo; se traduce a eventos `flow` con step/ts.
@@ -531,10 +603,12 @@ async def chat_stream(
         running_tasks: dict[str, dict[str, Any]] = {}
         stream = None
         try:
+            yield "event: start\ndata: {}\n\n"
             config = _build_config(thread_id, request, recursion_limit)
             if history_binding is not None:
                 config["configurable"]["vita_history"] = history_binding
             config["configurable"]["execution_id"] = execution_id
+            attach_collector(config, collector)
             agent_key = request.agent or request.agent_type_id or "base"
 
             stream = _bounded_stream(
@@ -629,19 +703,33 @@ async def chat_stream(
                         flow_trace.append(entry)
                         payload = json.dumps({"type": "flow", **entry}, ensure_ascii=False)
                         yield f"event: flow\ndata: {payload}\n\n"
-        except Exception:
-            _log_execution_error("Error en el stream del agente", vita=_history_opt_in(request))
+            turn_status, turn_error = (
+                ("completed", None) if final_state is not None else ("failed", "stream_interrupted")
+            )
+        except Exception as exc:
+            turn_status, turn_error = (
+                "failed",
+                ("turn_timeout" if isinstance(exc, TimeoutError) else error_code(exc)),
+            )
+            _log_execution_error("Error en el stream del agente", vita=_redact_execution(request))
             error = "No fue posible procesar la solicitud."
             payload = json.dumps({"type": "error", "error": error}, ensure_ascii=False)
             yield f"event: error\ndata: {payload}\n\n"
         finally:
-            if stream is not None:
-                with CancelScope(shield=True):
-                    await stream.aclose()
+            with CancelScope(shield=True):
+                try:
+                    if stream is not None:
+                        await stream.aclose()
+                finally:
+                    await _close_turn(
+                        collector,
+                        status=turn_status,
+                        error=turn_error,
+                        state=final_state,
+                        model=model,
+                    )
             latency_ms = int((time.perf_counter() - started) * 1000)
-            if error is not None:
-                await tracker.fail(execution_id, error=error, latency_ms=latency_ms)
-            elif final_state is not None:
+            if turn_status == "completed":
                 await tracker.complete(
                     execution_id,
                     result_state=final_state,
@@ -650,11 +738,9 @@ async def chat_stream(
                     flow_trace=flow_trace or None,
                 )
             else:
-                # Sin estado final (stream interrumpido): se registra como error
-                # de forma conservadora.
                 await tracker.fail(
                     execution_id,
-                    error="Stream interrumpido sin respuesta final.",
+                    error=error or "Stream interrumpido sin respuesta final.",
                     latency_ms=latency_ms,
                 )
             await session.commit()

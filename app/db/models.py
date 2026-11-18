@@ -14,8 +14,10 @@ from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     JSON,
     Boolean,
+    CheckConstraint,
     DateTime,
     Float,
+    ForeignKey,
     ForeignKeyConstraint,
     Index,
     Integer,
@@ -246,3 +248,71 @@ class AgentRuntimeConfig(Base):
     synced_at: Mapped[datetime | None] = _timestamptz("synced_at", nullable=True)
     created_at: Mapped[datetime] = _timestamptz("created_at", default_now=True)
     updated_at: Mapped[datetime | None] = _timestamptz("updated_at", nullable=True)
+
+
+# --- Event log append-only de Vita (tarea 2.4) ---------------------------------
+# Una fila por turno + eventos ordenados (nodo, tool, LLM, política). Solo
+# metadata técnica: nunca texto del paciente, respuestas ni resultados de tools.
+# Un trigger de BD rechaza UPDATE (append-only); DELETE queda para retención.
+VITA_CHANNELS = ("text", "voice", "whatsapp")
+VITA_TURN_STATUSES = ("completed", "failed", "cancelled", "rejected")
+VITA_EVENT_KINDS = ("node", "tool", "llm", "policy")
+
+
+class VitaTurn(Base):
+    """Turno de Vita en cualquier canal (sin contenido clínico duplicado)."""
+
+    __tablename__ = "vita_turns"
+    __table_args__ = (
+        CheckConstraint(f"channel IN {VITA_CHANNELS}", name="ck_vita_turns_channel"),
+        CheckConstraint(f"status IN {VITA_TURN_STATUSES}", name="ck_vita_turns_status"),
+        CheckConstraint("finished_at >= started_at", name="ck_vita_turns_time_order"),
+        Index("ix_vita_turns_thread_started", "thread_id", "started_at"),
+        Index("ix_vita_turns_patient_started", "patient_id", "started_at"),
+        {"schema": SCHEMA},
+    )
+
+    id: Mapped[str] = _uuid()
+    thread_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    patient_id: Mapped[str | None] = mapped_column(String(128))
+    channel: Mapped[str] = mapped_column(String(16), nullable=False)
+    agent_id: Mapped[str | None] = mapped_column(String(128))
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    started_at: Mapped[datetime] = _timestamptz("started_at")
+    finished_at: Mapped[datetime] = _timestamptz("finished_at")
+    latency_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    tokens_in: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    tokens_out: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    cost_usd: Mapped[float | None] = mapped_column(Numeric(12, 6))
+    error_code: Mapped[str | None] = mapped_column(String(64))
+    # Referencias (no copias): ejecución de observabilidad y mensaje del hilo.
+    execution_id: Mapped[str | None] = mapped_column(String(64))
+    message_ref: Mapped[str | None] = mapped_column(String(200))
+    created_at: Mapped[datetime] = _timestamptz("created_at", default_now=True)
+
+
+class VitaTurnEvent(Base):
+    """Evento ordenado dentro de un turno (nodo, tool, LLM o decisión de política)."""
+
+    __tablename__ = "vita_turn_events"
+    __table_args__ = (
+        UniqueConstraint("turn_id", "seq", name="uq_vita_turn_events_turn_seq"),
+        CheckConstraint(f"kind IN {VITA_EVENT_KINDS}", name="ck_vita_turn_events_kind"),
+        {"schema": SCHEMA},
+    )
+
+    id: Mapped[str] = _uuid()
+    turn_id: Mapped[str] = mapped_column(
+        Uuid(as_uuid=False),
+        ForeignKey(f"{SCHEMA}.vita_turns.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    seq: Mapped[int] = mapped_column(Integer, nullable=False)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    latency_ms: Mapped[int | None] = mapped_column(Integer)
+    tokens_in: Mapped[int | None] = mapped_column(Integer)
+    tokens_out: Mapped[int | None] = mapped_column(Integer)
+    error_code: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[datetime] = _timestamptz("created_at", default_now=True)

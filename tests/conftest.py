@@ -31,6 +31,9 @@ os.environ.setdefault(
 os.environ.setdefault("ENVIRONMENT", "test")
 os.environ.setdefault("INTERNAL_API_KEY", "test-internal-key")
 os.environ.setdefault("AUTO_MIGRATE", "false")
+# El event log de turnos (ai.vita_turns) se prueba con sesiones inyectadas o en
+# PostgreSQL desechable; nunca contra la BD por defecto del entorno.
+os.environ.setdefault("VITA_TURN_LOG_ENABLED", "false")
 
 SIMPLE_ANSWER = "¡Hola! Soy CoppAI. ¿En qué te ayudo?"
 

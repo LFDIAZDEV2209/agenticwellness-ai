@@ -21,6 +21,12 @@ from app.api.schemas import ChatRequest
 from app.api.streaming import ClosingStreamingResponse as StreamingResponse
 from app.core.config import get_settings
 from app.history.service import history_service, storage_key
+from app.observability.turn_trace import (
+    TurnTraceCollector,
+    attach_collector,
+    error_code,
+    persist_turn,
+)
 from app.vita.client import VitaAccessError, read_catalog
 from app.vita.locking import ThreadBusyError, thread_guard
 from app.vita.runtime import resolve_turn
@@ -222,6 +228,26 @@ async def completion(
             "voice_user_text": payload.messages[latest_user_index(payload.messages)].content,
         }
     )
+    collector = (
+        TurnTraceCollector(
+            thread_id=config["configurable"]["thread_id"],
+            channel="voice",
+            patient_id=record.patient_id or record.user_id,
+            agent_id=record.agent_id,
+        )
+        if admission.action == "run"
+        else None
+    )
+
+    async def record_interruption(status: str, code: str) -> None:
+        if collector is not None:
+            with CancelScope(shield=True):
+                try:
+                    with suppress(VoiceContextError):
+                        await voice_store.finish_admission(admission, "interrupted")
+                finally:
+                    await persist_turn(collector.finish(status=status, error_code=code))
+
     try:
         await prepare_admitted_turn(
             voice_store,
@@ -231,22 +257,15 @@ async def completion(
             timeout=settings.vita_turn_timeout,
         )
     except asyncio.CancelledError:
-        if admission.action == "run":
-            with CancelScope(shield=True):
-                with suppress(VoiceContextError):
-                    await voice_store.finish_admission(admission, "interrupted")
+        await record_interruption("cancelled", "cancelled")
         raise
     except (VoiceContextError, ThreadBusyError) as exc:
-        if admission.action == "run":
-            with suppress(VoiceContextError):
-                await voice_store.finish_admission(admission, "interrupted")
+        await record_interruption("rejected", error_code(exc))
         if str(exc) == "voice_turn_obsolete":
             return obsolete_response()
         raise HTTPException(status_code=getattr(exc, "status", 409), detail=str(exc)) from exc
     except Exception as exc:
-        if admission.action == "run":
-            with suppress(VoiceContextError):
-                await voice_store.finish_admission(admission, "interrupted")
+        await record_interruption("failed", error_code(exc))
         raise HTTPException(status_code=503, detail="history_state_unavailable") from exc
 
     if admission.action == "control":
@@ -329,16 +348,17 @@ async def completion(
         )
         config["recursion_limit"] = turn.recursion_limit
     except asyncio.CancelledError:
-        with CancelScope(shield=True):
-            with suppress(VoiceContextError):
-                await voice_store.finish_admission(admission, "interrupted")
+        await record_interruption("cancelled", "cancelled")
         raise
     except Exception as exc:
-        await voice_store.finish_admission(admission, "interrupted")
+        await record_interruption("failed", error_code(exc))
         if str(exc) == "voice_turn_obsolete":
             return obsolete_response()
         _log_failure("resolve", exc)
         raise HTTPException(status_code=503, detail="voice_runtime_unavailable") from exc
+
+    assert collector is not None
+    attach_collector(config, collector)
 
     async def events():
         started = request_started
@@ -346,6 +366,7 @@ async def completion(
         text_chars = 0
         state, completed = None, False
         next_access_check = time.monotonic() + 1
+        failure: str | None = None
         graph = AdmittedVoiceGraph(
             turn.graph, voice_store, admission, wait_timeout=settings.vita_turn_timeout
         )
@@ -408,14 +429,18 @@ async def completion(
                 yield "data: [DONE]\n\n"
         except (VoiceContextError, VitaAccessError, TimeoutError, ThreadBusyError) as exc:
             if str(exc) == "voice_turn_obsolete":
+                failure = "voice_turn_obsolete"
                 yield _chunk(admission.response_message_id, done=True)
                 yield "data: [DONE]\n\n"
             else:
+                failure = "turn_timeout" if isinstance(exc, TimeoutError) else error_code(exc)
                 _log_failure("generate", exc)
                 yield 'data: {"error":{"code":"voice_turn_interrupted"}}\n\n'
         except asyncio.CancelledError:
+            failure = "cancelled"
             raise
         except Exception as exc:
+            failure = error_code(exc)
             # Nunca serializar errores del proveedor/modelo: pueden contener PHI.
             _log_failure("generate", exc)
             yield 'data: {"error":{"code":"voice_runtime_error"}}\n\n'
@@ -433,9 +458,24 @@ async def completion(
                         await pending
                 with suppress(Exception):
                     await stream.aclose()
-                if not completed:
-                    with suppress(VoiceContextError):
-                        await voice_store.finish_admission(admission, "interrupted")
+                if completed:
+                    rejected = (state or {}).get("guardrail", {}).get("safe") is False
+                    await persist_turn(
+                        collector.finish(
+                            status="rejected" if rejected else "completed",
+                            error_code="guardrail_rejected" if rejected else None,
+                            model=turn.model,
+                            message_ref=admission.response_message_id,
+                            agent_id=turn.agent_id,
+                        )
+                    )
+                else:
+                    await record_interruption(
+                        "cancelled"
+                        if failure in (None, "cancelled", "voice_turn_obsolete")
+                        else "failed",
+                        failure or "voice_turn_interrupted",
+                    )
             logger.info(
                 "vita_voice_turn agent=%s version=%s reason=%s "
                 "first_token_ms=%s duration_ms=%s status=%s tools=%s source_count=%s "
