@@ -23,9 +23,7 @@ from app.api.main import create_app
 from app.graph.graph import build_graph
 from app.observability import turn_trace
 from app.observability.turn_trace import TurnTraceCollector, attach_collector, persist_turn
-from app.tools import policy
 from app.tools.policy import (
-    PENDING_CONTRACT_TOOLS,
     TOOL_SPECS,
     ToolSpec,
     filter_for_channel,
@@ -33,6 +31,7 @@ from app.tools.policy import (
     spec_for,
 )
 from app.tools.registry import ALL_TOOLS, TOOLS_BY_NAME
+from app.tools.vita import VITA_RECORD_TOOL_NAMES
 from app.vita.context_builder import (
     SUMMARY_PREFIX,
     ContextBudget,
@@ -63,11 +62,12 @@ def test_toda_tool_registrada_tiene_politica_explicita():
     assert not missing, f"Tools registradas sin ToolSpec en app/tools/policy.py: {missing}"
 
 
-def test_tools_pendientes_de_contrato_no_existen_ni_se_exponen():
-    assert {"get_my_profile", "get_my_vitals", "get_my_medications"} == PENDING_CONTRACT_TOOLS
-    assert not PENDING_CONTRACT_TOOLS & set(TOOLS_BY_NAME)
-    for name in PENDING_CONTRACT_TOOLS:
-        assert not any(spec_for(name).allows(channel) for channel in policy.ALL_CHANNELS)
+def test_tools_de_ficha_solo_se_exponen_en_chat_y_voz():
+    assert VITA_RECORD_TOOL_NAMES.issubset(TOOLS_BY_NAME)
+    for name in VITA_RECORD_TOOL_NAMES:
+        assert spec_for(name).allows("text")
+        assert spec_for(name).allows("voice")
+        assert not spec_for(name).allows("whatsapp")
 
 
 def test_politica_por_canal():

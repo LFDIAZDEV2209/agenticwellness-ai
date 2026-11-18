@@ -194,6 +194,7 @@ class AgentRuntimeRegistry:
         version_id: str,
         runtime_config: AgentRuntimeConfig,
         prepare_tools: list[str] | None = None,
+        final_after_tools: bool = False,
     ) -> CompiledAgent:
         """Construye el grafo con los overrides del agente (provider/model/tools)."""
         try:
@@ -233,6 +234,7 @@ class AgentRuntimeRegistry:
             max_tool_calls=runtime_config.max_tool_calls,
             tool_timeout_seconds=runtime_config.tool_timeout_seconds,
             prepare_tools=prepare_tools,
+            final_after_tools=final_after_tools,
             enable_memory=runtime_config.memory_config.enabled,
             checkpointer=(
                 await get_checkpointer()
@@ -271,12 +273,13 @@ class AgentRuntimeRegistry:
         channel: str = "text",
         scope: str | None = None,
         prepare_personal_read: bool = False,
+        plan_record: bool = False,
         ground_knowledge: bool = False,
         global_knowledge_base_ids: list[str] | None = None,
     ) -> CompiledAgent:
         """Overlay explícito SOLO tras autorización Vita; no cambia la config ERP.
 
-        La política de código concede las seis lecturas al paciente autenticado.
+        La política de código concede las lecturas de Vita al paciente autenticado.
         Metadata de routing no puede añadir herramientas, escrituras ni KBs.
         """
         from app.tools.vita import VITA_READ_TOOL_NAMES
@@ -290,7 +293,7 @@ class AgentRuntimeRegistry:
         names = {t.name for t in self._select_tools(config.tools, compiled.agent_type_id)}
         config.tools = sorted((names - {"get_patient_data"}) | VITA_READ_TOOL_NAMES)
         prepare = None
-        if prepare_personal_read or channel == "voice" or ground_knowledge:
+        if not plan_record and (prepare_personal_read or channel == "voice" or ground_knowledge):
             prepare = [f"get_my_{scope}"] if scope else []
             if (
                 ground_knowledge
@@ -303,6 +306,7 @@ class AgentRuntimeRegistry:
             compiled.version_id,
             config,
             prepare_tools=prepare,
+            final_after_tools=plan_record and channel == "voice",
         )
 
 

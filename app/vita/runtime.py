@@ -16,13 +16,14 @@ from app.graph.graph import build_graph
 from app.llm.factory import get_chat_model
 from app.tools.registry import TOOLS_BY_NAME, legacy_tools
 from app.tools.retrieval import make_retrieve_tool
-from app.tools.vita import VITA_READ_TOOL_NAMES
+from app.tools.vita import VITA_READ_TOOL_NAMES, VITA_RECORD_TOOL_NAMES
 from app.vita.client import VitaAccessError, read_catalog
 from app.vita.locking import LockedGraph
 from app.vita.routing import (
     AuthorizedAgent,
     capability_scope,
     documentation_query,
+    patient_record_query,
     select_agent,
     service_query,
 )
@@ -95,23 +96,34 @@ async def resolve_turn(
 ) -> ResolvedTurn:
     catalog = TypeAdapter(list[AuthorizedAgent]).validate_python(await read_catalog(user_id))
     snapshot = await base_graph.aget_state(config)
-    previous = (snapshot.values or {}).get("agent") if snapshot else None
+    previous_state = (snapshot.values or {}) if snapshot else {}
+    previous = previous_state.get("agent")
+    service = service_query(text)
     scope = capability_scope(text)
-    direct_read = capability_scope(text, unambiguous=True) is not None
+    documentation = documentation_query(text)
+    record_followup = (
+        not scope
+        and not documentation
+        and VITA_RECORD_TOOL_NAMES.intersection(previous_state.get("tools_used", ()))
+    )
+    plan_record = not service and (patient_record_query(text) or bool(record_followup))
+    if plan_record:
+        scope = None
+    direct_read = not plan_record and capability_scope(text, unambiguous=True) is not None
+    ground = not service and (documentation or (scope is None and not plan_record))
     decision = await select_agent(
         text,
         catalog,
         explicit=explicit,
         previous=previous,
         channel=channel,
-        classifier=None if scope else classify,
+        classifier=None if scope or plan_record else classify,
     )
     if decision.agent is not None:
         agent = decision.agent
         compiled = await runtime_registry.get_agent(agent.runtime_key, session)
         if compiled.version_id != agent.version_id:
             raise VitaAccessError("vita_version_not_synced")
-        ground = (scope is None or documentation_query(text)) and not service_query(text)
         global_ids = (
             await resolve_knowledge_base_ids(session, "base", [])
             if ground and not compiled.runtime_config.retrieval_config.enabled
@@ -122,6 +134,7 @@ async def resolve_turn(
             channel=channel,
             scope=scope,
             prepare_personal_read=direct_read,
+            plan_record=plan_record,
             ground_knowledge=ground,
             global_knowledge_base_ids=global_ids,
         )
@@ -150,7 +163,7 @@ async def resolve_turn(
     # activas, nunca documentos de un especialista que no fue seleccionado.
     prepare = [f"get_my_{scope}"] if scope else []
     # Los saludos y ayudas de servicio permanecen inmediatos y sin RAG.
-    if (scope is None or documentation_query(text)) and not service_query(text):
+    if ground:
         ids = await resolve_knowledge_base_ids(session, "base", [])
         if ids:
             tools.append(make_retrieve_tool(knowledge_base_ids=ids))
@@ -161,8 +174,10 @@ async def resolve_turn(
         tools=tools,
         max_tool_calls=3,
         prepare_tools=prepare
-        if direct_read or channel == "voice" or "retrieve_knowledge" in prepare
+        if not plan_record
+        and (direct_read or channel == "voice" or "retrieve_knowledge" in prepare)
         else None,
+        final_after_tools=plan_record and channel == "voice",
     )
     return ResolvedTurn(
         LockedGraph(graph, "capability" if scope else decision.reason),

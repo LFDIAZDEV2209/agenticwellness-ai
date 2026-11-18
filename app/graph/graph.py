@@ -64,6 +64,7 @@ def build_graph(
     max_tool_calls: int = 8,
     tool_timeout_seconds: float = 3,
     prepare_tools: list[str] | None = None,
+    final_after_tools: bool = False,
 ):
     """Construye y compila el grafo supervisor.
 
@@ -79,6 +80,8 @@ def build_graph(
         profile_resolver: opcional. Callable que recibe el estado y devuelve el
             `AgentProfile` activo (routing por intención). Si se omite, el
             agente usa siempre `system_prompt`/`tools` (perfil `base`).
+        final_after_tools: voz transmite desde `answer` tras las lecturas que
+            eligió el modelo. La planificación de `agent` queda fuera del audio.
     Returns:
         Grafo compilado (acepta `.invoke`, `.ainvoke`, `.astream`).
     """
@@ -93,6 +96,7 @@ def build_graph(
             max_tool_calls=max_tool_calls,
             tool_timeout_seconds=tool_timeout_seconds,
         )
+    model = model or get_chat_model(temperature=None)
     workflow = StateGraph(AgentState)
 
     workflow.add_node("guardrails", guardrails_node)
@@ -102,9 +106,7 @@ def build_graph(
         # rechazan el kwarg (400 "Extra inputs are not permitted" en cada
         # turno del chat de la app); el patrón None explícito es el mismo que
         # usan content_translation/program_narrative/assessment_analysis.
-        make_agent_node(
-            model or get_chat_model(temperature=None), system_prompt, tools, profile_resolver
-        ),
+        make_agent_node(model, system_prompt, tools, profile_resolver),
     )
     workflow.add_node(
         "tools", make_tools_node(tools, profile_resolver, max_tool_calls, tool_timeout_seconds)
@@ -133,10 +135,16 @@ def build_graph(
         if enable_memory
         else {"tools": "tools", END: END},
     )
+    after_tools = "answer" if final_after_tools else "agent"
+    if final_after_tools:
+        workflow.add_node(
+            "answer", make_agent_node(model, system_prompt, tools=[], final_response=True)
+        )
+        workflow.add_edge("answer", "memory_save" if enable_memory else END)
     workflow.add_conditional_edges(
         "tools",
-        lambda state: END if isinstance(state["messages"][-1], AIMessage) else "agent",
-        {END: END, "agent": "agent"},
+        lambda state: END if isinstance(state["messages"][-1], AIMessage) else after_tools,
+        {END: END, after_tools: after_tools},
     )
     if enable_memory:
         workflow.add_edge("memory_save", END)

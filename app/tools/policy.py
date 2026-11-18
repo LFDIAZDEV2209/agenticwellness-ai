@@ -11,8 +11,7 @@ pueden ejecutarse:
   presupuesto global `max_tool_calls` del grafo).
 - `deadline_seconds`: tiempo máximo total de la llamada, incluidos los reintentos.
 - `retries`: reintentos SOLO ante timeout y SOLO para tools idempotentes.
-- `status`: `active`, `disabled` o `pending_contract` (declarada, sin implementar:
-  espera `CONTRATOS-A.md` del backend; nunca se enlaza).
+- `status`: `active` o `disabled`.
 """
 
 from __future__ import annotations
@@ -24,7 +23,7 @@ from typing import Any, Literal
 from langchain_core.tools import BaseTool
 
 Channel = Literal["text", "voice", "whatsapp"]
-ToolStatus = Literal["active", "disabled", "pending_contract"]
+ToolStatus = Literal["active", "disabled"]
 
 ALL_CHANNELS: frozenset[Channel] = frozenset({"text", "voice", "whatsapp"})
 APP_CHANNELS: frozenset[Channel] = frozenset({"text", "voice"})
@@ -81,17 +80,11 @@ TOOL_SPECS: Mapping[str, ToolSpec] = {
         _read("get_my_exercise"),
         _read("get_my_progress"),
         ToolSpec("retrieve_knowledge", max_calls_per_turn=2, deadline_seconds=3.0, retries=1),
-        # Interfaces reservadas: esperan el contrato del carril backend. No se
-        # inventan argumentos ni campos; quedan fuera de cualquier canal.
-        ToolSpec("get_my_profile", frozenset(), status="pending_contract"),
-        ToolSpec("get_my_vitals", frozenset(), status="pending_contract"),
-        ToolSpec("get_my_medications", frozenset(), status="pending_contract"),
+        _read("get_my_profile", APP_CHANNELS),
+        _read("get_my_vitals", APP_CHANNELS),
+        _read("get_my_medications", APP_CHANNELS),
     )
 }
-
-PENDING_CONTRACT_TOOLS = frozenset(
-    name for name, spec in TOOL_SPECS.items() if spec.status == "pending_contract"
-)
 
 
 def spec_for(name: str) -> ToolSpec:

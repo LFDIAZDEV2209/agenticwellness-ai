@@ -211,8 +211,11 @@ async def _emit_policy(tool: str, decision: str, code: str | None = None) -> Non
 
 
 def _unavailable(call: dict, code: str) -> ToolMessage:
+    payload = {"status": "unavailable", "code": code}
+    if code == "tool_timeout":
+        payload["message"] = "La consulta tardó demasiado. Puedes intentarlo de nuevo."
     return ToolMessage(
-        content=json.dumps({"status": "unavailable", "code": code}),
+        content=json.dumps(payload, ensure_ascii=False),
         name=call["name"],
         tool_call_id=call["id"],
         status="error",
@@ -655,8 +658,13 @@ def make_tools_node(
         # aunque el modelo la pida (p. ej. argumentos/tool_calls manipulados).
         selected = filter_for_channel(_active_tools(tools, profile), channel)
         allowed = {tool.name for tool in selected}
+        # La única excepción al esquema personal vacío es el rango de vitales.
+        # Cualquier selector u otro argumento sigue bloqueado antes de ejecutar.
+        personal_arguments = {"get_my_vitals": {"from", "to"}}
         invalid_arguments = any(
-            call["name"].startswith("get_my_") and bool(call.get("args")) for call in calls
+            call["name"].startswith("get_my_")
+            and set(call.get("args", {})).difference(personal_arguments.get(call["name"], ()))
+            for call in calls
         )
         blocked = (
             exhausted or invalid_arguments or any(call["name"] not in allowed for call in calls)
@@ -677,12 +685,14 @@ def make_tools_node(
             )
             runnable, denied = [], {}
             for call in calls:
-                counts[call["name"]] += 1
-                if counts[call["name"]] > spec_for(call["name"]).max_calls_per_turn:
-                    denied[call["id"]] = _unavailable(call, "tool_budget_exceeded")
-                    await _emit_policy(call["name"], "blocked", "tool_budget_exceeded")
-                else:
-                    runnable.append(call)
+                name = call["name"]
+                counts[name] += 1
+                if counts[name] > spec_for(name).max_calls_per_turn:
+                    reason = "tool_budget_exceeded"
+                    denied[call["id"]] = _unavailable(call, reason)
+                    await _emit_policy(name, "blocked", reason)
+                    continue
+                runnable.append(call)
             node = ToolNode(selected)
             outcomes = await asyncio.gather(
                 *(

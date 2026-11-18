@@ -209,6 +209,28 @@ def service_query(text: str) -> bool:
     return _service_query(normalize(text))
 
 
+def patient_record_query(text: str) -> bool:
+    """Abre el catálogo de lecturas si se pide un dato personal de la ficha."""
+    text = _positive_text(text)
+    return bool(
+        re.search(
+            r"\b(perfil|ficha|profile|record|mis datos|my data|edad|age|metas?|goals?|"
+            r"alergias?|allergies|restricciones|restrictions|peso|talla|imc|weight|height|bmi|"
+            r"antropometria|anthropometry|"
+            r"signos vitales|vitals?|biometria|biometrics|presion|tension arterial|blood pressure|"
+            r"pulso|heart rate|glucosa|glucose|blood sugar|saturacion|oxygen|temperatura|"
+            r"temperature|grasa corporal|body fat|sueno|sleep|medicamentos?|medicacion|"
+            r"meds|medications?|tratamientos?|treatments?|dosis|doses?|suplementos?|supplements?)\b",
+            text,
+        )
+        and re.search(
+            r"\b(mi|mis|yo|me|my|i|mine|ayer|yesterday|hoy|today|tomo|tome|tomado|"
+            r"muestrame|show|dime|tell me|registrad[oa]s?|recorded)\b",
+            text,
+        )
+    )
+
+
 def capability_scope(text: str, *, unambiguous: bool = False) -> str | None:
     """Atajos a lecturas; los datos reales y sus permisos siempre vienen de BACK."""
     text = _positive_text(text)
