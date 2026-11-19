@@ -212,6 +212,8 @@ def test_intencion_de_captura(text, expected):
 
 
 def test_el_artifact_con_token_no_se_serializa_hacia_el_proveedor():
+    import inspect
+
     from langchain_anthropic.chat_models import _format_messages
     from langchain_openai.chat_models.base import _convert_message_to_dict
 
@@ -221,7 +223,14 @@ def test_el_artifact_con_token_no_se_serializa_hacia_el_proveedor():
         name="record_measurement",
         artifact={"kind": PENDING_ARTIFACT, "proposals": [{"token": TOKEN}]},
     )
-    assert TOKEN not in str(_format_messages([message]))
+    # langchain-anthropic exige `model` en versiones nuevas; en las antiguas no existe.
+    supports_model = "model" in inspect.signature(_format_messages).parameters
+    formatted = (
+        _format_messages([message], model="claude-sonnet-4-6")
+        if supports_model
+        else _format_messages([message])
+    )
+    assert TOKEN not in str(formatted)
     assert TOKEN not in str(_convert_message_to_dict(message))
 
 
