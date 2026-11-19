@@ -205,6 +205,18 @@ def test_large_image_is_downscaled_before_vision():
         assert max(image.size) <= attachment_context._VISION_MAX_SIDE
 
 
+def test_vision_model_omits_temperature(monkeypatch):
+    captured: dict = {}
+
+    def fake(**kwargs):
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(attachment_context, "get_chat_model", fake)
+    attachment_context.get_vision_model()
+    assert captured.get("temperature", "missing") is None
+
+
 async def test_extraction_timeout_is_unavailable(monkeypatch):
     import asyncio
 

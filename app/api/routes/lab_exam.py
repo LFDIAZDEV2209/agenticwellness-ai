@@ -104,8 +104,10 @@ REGLAS ESTRICTAS:
 def get_lab_exam_model() -> BaseChatModel:
     """Obtiene el modelo LLM para extracción de exámenes (inyectable para tests)."""
     try:
+        # temperature=None omite el parámetro: los modelos con thinking de
+        # Anthropic lo rechazan con 400 ("temperature: Extra inputs are not permitted").
         return get_chat_model(
-            temperature=0.0,
+            temperature=None,
             max_tokens=2048,
         )
     except ConfigError as exc:

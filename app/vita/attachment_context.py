@@ -95,7 +95,9 @@ class AttachmentTurnContext:
 def get_vision_model() -> BaseChatModel:
     """Modelo de visión del proveedor configurado (inyectable en tests)."""
     settings = get_settings()
-    return get_chat_model(temperature=0.0, max_tokens=min(4096, settings.llm_max_tokens * 2))
+    # temperature=None omite el parámetro: los modelos con thinking de
+    # Anthropic lo rechazan con 400 ("temperature: Extra inputs are not permitted").
+    return get_chat_model(temperature=None, max_tokens=min(4096, settings.llm_max_tokens * 2))
 
 
 def _png(width: int, height: int, channels: int, pixels: bytes) -> bytes:

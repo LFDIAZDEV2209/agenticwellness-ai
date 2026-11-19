@@ -15,6 +15,20 @@ INTERNAL_KEY = get_settings().internal_api_key
 HEADERS = {"X-Internal-Key": INTERNAL_KEY}
 
 
+def test_lab_exam_model_omits_temperature(monkeypatch):
+    import app.api.routes.lab_exam as lab_exam
+
+    captured: dict = {}
+
+    def fake(**kwargs):
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(lab_exam, "get_chat_model", fake)
+    lab_exam.get_lab_exam_model()
+    assert captured.get("temperature", "missing") is None
+
+
 class FakeDbSession:
     """Sesión de BD fake para tests."""
 
