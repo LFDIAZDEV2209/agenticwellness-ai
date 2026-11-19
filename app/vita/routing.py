@@ -257,6 +257,84 @@ def patient_record_query(text: str) -> bool:
     )
 
 
+_RECORD_TOPIC_PATTERNS = {
+    "vitals": (
+        r"signos vitales|vitals?|biometria|biometrics|presion|tension arterial|blood pressure|"
+        r"pulso|frecuencia cardiaca|heart rate|glucosa|glucose|blood sugar|saturacion|oxygen|"
+        r"temperatura|temperature|grasa corporal|body fat|sueno|sleep|reloj|manilla|anillo|"
+        r"wearable|watch|tracker|spo2|pasos|steps|calorias activas|active calories|"
+        r"distancia|distance"
+    ),
+    "profile": (
+        r"perfil|ficha|profile|edad|age|metas?|goals?|alergias?|allergies|restricciones|"
+        r"restrictions|peso|talla|imc|weight|height|bmi|antropometria|anthropometry"
+    ),
+    "medications": (
+        r"medicamentos?|medicacion|meds|medications?|tratamientos?|treatments?|"
+        r"dosis|doses?|suplementos?|supplements?"
+    ),
+    "assessments": (
+        r"evaluaciones?|assessments?|tests?|baterias?|batter(?:y|ies)|puntajes?|scores?|"
+        r"resultados? (?:de (?:mis )?)?(?:pruebas|evaluaciones|tests)"
+    ),
+    "nutrition_plan": (
+        r"ciclo nutricional|nutrition cycle|historial de comidas|meal history|"
+        r"plan completo|full meal plan|plan de 30 dias|30.day plan"
+    ),
+    "documents": r"expediente|documentos?|documents?|archivos?|files?|informes?|reports?",
+}
+
+
+def voice_record_topics(text: str) -> set[str]:
+    normalized = _positive_text(text)
+    return {
+        topic
+        for topic, pattern in _RECORD_TOPIC_PATTERNS.items()
+        if re.search(rf"\b(?:{pattern})\b", normalized)
+    }
+
+
+def voice_record_lookup(text: str) -> bool:
+    return patient_record_query(text) or bool(
+        re.search(
+            r"\b(?:mi|mis|my|mine|muestrame|dime|show me|tell me)\b|"
+            r"^(?:los|las) (?:del|de la) (?:reloj|manilla|anillo|wearable)\b|"
+            r"^(?:the ones from|from) (?:the|my) (?:watch|wearable|tracker)\b",
+            _positive_text(text).strip("¿?! ."),
+        )
+    )
+
+
+def voice_document_list_lookup(text: str) -> bool:
+    # Mencionar el nombre del recurso al pedir el listado personal no basta
+    # para activar RAG. Una referencia a una guía o un protocolo sí lo hace.
+    without_resource = re.sub(r"\b(?:documentos?|documents?)\b", "", _positive_text(text))
+    return voice_record_lookup(text) and not documentation_query(without_resource)
+
+
+def voice_record_followup(text: str) -> bool:
+    """Reconoce referencias elípticas, sin heredar el tema de cualquier pregunta."""
+    normalized = _positive_text(text).strip("¿?¡! .,;:")
+    return bool(
+        re.fullmatch(
+            r"(?:(?:y|entonces|and|so|what about|how about|muestrame|dime|show me|tell me) )?"
+            r"(?:(?:los|las|the) (?:de |del |from )?)?"
+            r"(?:de )?(?:ayer|hoy|anoche|esta semana|la semana pasada|ultim[oa]s? "
+            r"(?:(?:\d+|siete|tres) )?dias?|yesterday|today|last night|this week|last week|"
+            r"(?:last|past) (?:(?:\d+|few|seven|three) )?days?|"
+            r"cuales(?: son| eran)?|cuantos|el resto|lo demas|which ones?|the rest|what else)"
+            r"(?: por favor| please)?",
+            normalized,
+        )
+        or re.match(
+            r"^(?:como asi (?:el )?\d|de que (?:fecha|dia) hablas|"
+            r"what do you mean (?:by |on )?(?:the )?(?:\d|january|february|march|april|may|"
+            r"june|july|august|september|october|november|december)\b)",
+            normalized,
+        )
+    )
+
+
 def capture_query(text: str) -> bool:
     """El paciente reporta un dato para registrarlo (medición, toma, comida o ánimo).
 

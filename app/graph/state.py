@@ -24,6 +24,7 @@ class AgentState(TypedDict, total=False):
     turn_start_index: int
     tool_call_count: int
     tool_budget_exhausted: bool
+    record_topic: str | None
     context_agent: str
     turn_context_changed: bool
     app_actions: Annotated[list[dict[str, Any]], operator.add]

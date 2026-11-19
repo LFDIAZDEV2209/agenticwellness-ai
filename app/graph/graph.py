@@ -13,6 +13,7 @@ cuando exista la lógica de negocio (ver app/orchestration/router.py).
 
 from __future__ import annotations
 
+from functools import partial
 from itertools import takewhile
 from typing import Any
 from uuid import uuid4
@@ -84,6 +85,7 @@ def build_graph(
     prepare_tools: list[str] | None = None,
     final_after_tools: bool = False,
     retrieval_scope: RagScope = "program",
+    record_topic: str | None = None,
 ):
     """Construye y compila el grafo supervisor.
 
@@ -119,7 +121,7 @@ def build_graph(
     model = model or get_chat_model(temperature=None)
     workflow = StateGraph(AgentState)
 
-    workflow.add_node("guardrails", guardrails_node)
+    workflow.add_node("guardrails", partial(guardrails_node, record_topic=record_topic))
     workflow.add_node(
         "agent",
         # temperature=None explícito: los modelos thinking de Anthropic

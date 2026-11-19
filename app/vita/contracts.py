@@ -317,7 +317,7 @@ class DocumentContent(RecordDto):
 class RecordReadResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    status: Literal["ok", "empty", "unavailable", "forbidden"]
+    status: Literal["ok", "empty", "unavailable", "forbidden", "stale"]
     data: (
         ProfileRecord
         | VitalsRecord

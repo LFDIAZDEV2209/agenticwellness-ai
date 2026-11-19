@@ -220,6 +220,14 @@ async def test_dto_del_contrato(resource, payload, expected_status, backend):
     result = await invoke(resource)
     if resource == "medications" and expected_status == "empty":
         assert result.pop("message") == "No hay tratamientos vigentes."
+    if resource == "vitals" and expected_status == "ok":
+        point = payload["latest"][0]
+        local = (
+            {"localDate": "2026-11-16", "localTime": "08:00"}
+            if point == HEALTH_TEST_WEIGHT
+            else {"localDate": "2026-11-18", "localTime": "07:00"}
+        )
+        payload = {**payload, "latest": [{**point, **local}], "history": [{**point, **local}]}
     assert result == {"status": expected_status, "data": payload}
     (request,) = requests
     assert request.method == "GET"

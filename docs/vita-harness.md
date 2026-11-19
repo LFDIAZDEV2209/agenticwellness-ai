@@ -58,8 +58,22 @@ pueden usar estas lecturas cuando el turno pide datos personales.
 | `read_my_document` | `/documents/{id}` | Extracto de texto de un documento propio, seleccionado por su ID. |
 
 Un saludo no prepara lecturas. En voz, la selección para consultas de ficha puede
-añadir una invocación al modelo. La respuesta al paciente se genera después de la
-lectura. El presupuesto del harness acota los resultados largos al armar el prompt.
+añadir una invocación al modelo. El tema planificado o leído queda en el checkpoint
+para seguimientos como «y ayer». Las lecturas de ficha usan las tools del paciente.
+Las preguntas sobre el contenido de un documento conservan su ruta autorizada.
+Los puntos de vitales incluyen `localDate` y `localTime` de la zona del paciente.
+En voz, `history` aporta la última muestra por día local y métrica, hasta siete días
+y doce métricas. `truncated` y `daysReturned` indican el alcance devuelto.
+El adaptador emite por SSE frases completas de `answer` a medida que se confirman.
+El audio se limita a tres frases y 40 palabras si hubo resultados o herramientas, o
+50 en los demás turnos. `VITA_VOICE_MAX_TOKENS` limita cada generación a 180 tokens
+de salida por defecto. El SSE sigue consumiendo el grafo al alcanzar el límite.
+Para mantener el audio como prefijo del hilo, el adaptador resuelve las listas,
+los enlaces y las frases que compiten con la oferta de continuar por chat al final.
+El hilo puede conservar una cola sin puntuación o instrucciones urgentes
+que excedan el presupuesto del audio. Si el modelo no emitió fragmentos de texto,
+el SSE usa la respuesta guardada y admite una respuesta breve sin puntuación final.
+Los reintentos de turnos completados aplican ese mismo fallback al texto guardado.
 WhatsApp tiene la misma matriz que chat y voz (KAN-74 8.1). Siguen fuera de WhatsApp
 `get_patient_data` (perfil legado) y `mark_control_declined` (controles de la app);
 `suggest_appointment` sigue retirada en todos los canales.

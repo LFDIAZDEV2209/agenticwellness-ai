@@ -12,9 +12,10 @@ from app.agents.prompts import (
     SERVICE_DELIVERY_POLICY,
     TEXT_DELIVERY_POLICY,
     VOICE_DELIVERY_POLICY,
+    WHATSAPP_SCOPE_POLICY,
 )
 from app.agents.runtime_registry import AgentRuntimeRegistry
-from app.core.config import get_settings
+from app.core.config import Settings, get_settings
 from app.graph.graph import build_graph
 from app.vita import runtime
 from app.vita.contracts import ContextEnvelope
@@ -89,11 +90,14 @@ def test_two_personal_scopes_do_not_claim_single_read_is_sufficient(text):
         ("voice", False, False),
         ("voice", True, False),
         ("text", True, True),
+        ("whatsapp", False, False),
+        ("whatsapp", True, False),
     ],
 )
 async def test_base_and_specialist_can_read_facts_without_erp_tool_config(
     monkeypatch, explicit, channel, multiple
 ):
+    monkeypatch.setattr(get_settings(), "vita_voice_max_tokens", 137)
     checkpoint = MemorySaver()
     model = RecordingFakeModel(responses=[AIMessage(content="El menú vigente figura en tu plan")])
     if multiple:
@@ -152,6 +156,7 @@ async def test_base_and_specialist_can_read_facts_without_erp_tool_config(
             {
                 "provider": "openai",
                 "model": "specialist-effective",
+                "max_tokens": 333,
                 "tools": [],
             }
         ),
@@ -177,12 +182,19 @@ async def test_base_and_specialist_can_read_facts_without_erp_tool_config(
             # recompila con el modelo rápido.
             assert model_options[-1]["model"] == get_settings().vita_voice_model
             assert all(o["model"] == "specialist-effective" for o in model_options[:-1])
+            assert [o["max_tokens"] for o in model_options] == [333, 137]
         else:
             assert all(o["model"] == "specialist-effective" for o in model_options)
+            assert all(o["max_tokens"] == 333 for o in model_options)
         assert all(o["provider"] == "openai" for o in model_options)
+    elif channel == "voice":
+        assert [o["max_tokens"] for o in model_options] == [137]
+    else:
+        assert all("max_tokens" not in o for o in model_options)
     assert len(model.prompts) == (2 if multiple else 1)
     assert "vigente" in str(model.prompts[-1])
-    assert all(p[0].content == PATIENT_SCOPE_POLICY for p in model.prompts)
+    scope_policy = WHATSAPP_SCOPE_POLICY if channel == "whatsapp" else PATIENT_SCOPE_POLICY
+    assert all(p[0].content == scope_policy for p in model.prompts)
     for prompt in model.prompts:
         policies = [message.content for message in prompt if message.type == "system"]
         assert policies.count(VOICE_DELIVERY_POLICY) == (1 if channel == "voice" else 0)
@@ -191,7 +203,11 @@ async def test_base_and_specialist_can_read_facts_without_erp_tool_config(
         assert "at most one useful question" in VOICE_DELIVERY_POLICY
         assert "Do not impersonate a human" in VOICE_DELIVERY_POLICY
         assert "source title" in VOICE_DELIVERY_POLICY
-        assert all(options.get("max_tokens") is None for options in model_options)
+
+
+def test_voice_model_token_limit_defaults_to_180(monkeypatch):
+    monkeypatch.delenv("VITA_VOICE_MAX_TOKENS", raising=False)
+    assert Settings(_env_file=None).vita_voice_max_tokens == 180
 
 
 @pytest.mark.parametrize("failure", [RuntimeError, TimeoutError])

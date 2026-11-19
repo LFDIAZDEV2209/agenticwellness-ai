@@ -8,6 +8,7 @@ import logging
 from collections import Counter
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
+from uuid import uuid4
 
 from langchain_core.callbacks.manager import adispatch_custom_event
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -32,6 +33,7 @@ from app.agents.prompts import (
     build_turn_policy,
 )
 from app.agents.registry import AgentProfile
+from app.api.message_text import extract_message_text
 from app.core.config import get_settings
 from app.graph.language import detect_turn_language
 from app.graph.state import AgentState
@@ -41,7 +43,7 @@ from app.safety.guardrails import check_input_guardrails
 from app.tools.catalog import conversion_failures, tool_label
 from app.tools.policy import TOOL_SPECS, filter_for_channel, resolve_channel, spec_for
 from app.tools.registry import TOOLS_BY_NAME, legacy_tools, patient_tools
-from app.tools.vita import VITA_TOOL_ARGUMENTS
+from app.tools.vita import RECORD_TOOL_TOPICS, RECORD_TOPIC_TOOLS, VITA_TOOL_ARGUMENTS
 from app.vita.capture import VITA_CAPTURE_TOOL_NAMES
 from app.vita.context_builder import (
     MESSAGE_OVERHEAD_TOKENS,
@@ -50,6 +52,7 @@ from app.vita.context_builder import (
     estimate_tokens,
 )
 from app.vita.routing import service_query
+from app.voice.delivery import format_voice_answer, voice_turn_has_results
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +62,7 @@ logger = logging.getLogger(__name__)
 TOOL_CATALOG_ERROR_CODE = "tool_catalog_unavailable"
 
 
-def guardrails_node(state: AgentState) -> dict:
+def guardrails_node(state: AgentState, *, record_topic: str | None = None) -> dict:
     """Nodo de entrada: valida y sanitiza el mensaje del usuario.
 
     Si es inseguro, termina el turno (el edge condicional lo enruta a END)
@@ -124,6 +127,7 @@ def guardrails_node(state: AgentState) -> dict:
         "turn_start_index": amended_at if amended_at is not None else len(prior_messages),
         "tool_call_count": 0,
         "tool_budget_exhausted": False,
+        "record_topic": None,
         "app_actions": Overwrite([]),
         "data_sources": Overwrite([]),
         "turn_context_changed": state.get("context_agent") != state.get("agent", "base"),
@@ -155,6 +159,7 @@ def guardrails_node(state: AgentState) -> dict:
 
     return {
         **turn_state,
+        "record_topic": record_topic if configurable.get("message_channel") == "voice" else None,
         "input": result.sanitized,
         # Una sola entrada por turno: el ciclo agent/tools reutiliza el historial.
         "messages": turn_messages(
@@ -370,6 +375,13 @@ def make_agent_node(
         profile = await profile_resolver(state) if profile_resolver else None
         active_prompt = profile.system_prompt if profile else system_prompt
         configurable = get_config().get("configurable", {})
+        voice = configurable.get("message_channel") == "voice"
+        record_tools = RECORD_TOPIC_TOOLS.get(state.get("record_topic"), ()) if voice else ()
+        first_plan = (
+            not final_response
+            and bool(record_tools)
+            and isinstance(state["messages"][-1], HumanMessage)
+        )
         try:
             # Permisos por canal: lo que el canal no admite ni se ofrece al modelo.
             active_tools = (
@@ -380,7 +392,12 @@ def make_agent_node(
                     resolve_channel(configurable, profile.key if profile else None),
                 )
             )
-            active_model = model.bind_tools(active_tools) if active_tools else model
+            if record_tools:
+                active_tools = [tool for tool in active_tools if tool.name in record_tools]
+            if first_plan and len(active_tools) == 1:
+                active_model = model.bind_tools(active_tools, tool_choice=active_tools[0].name)
+            else:
+                active_model = model.bind_tools(active_tools) if active_tools else model
         except Exception as exc:
             # Guarda de catálogo: una tool que no resuelve/convierte nunca debe
             # producir un 500 ni silencio en el canal. Se registra solo metadata
@@ -494,6 +511,20 @@ def make_agent_node(
         if attachment_block:
             prompt = _with_attachment_data(context, attachment_block)
         response = await active_model.ainvoke(prompt)
+        if (
+            first_plan
+            and active_tools
+            and (
+                not response.tool_calls
+                or any(call["name"] not in record_tools for call in response.tool_calls)
+            )
+        ):
+            # Un planificador que devuelve texto libre no puede prometer una
+            # lectura. El rango/página por defecto sigue siendo decisión de BACK.
+            response = AIMessage(
+                content="",
+                tool_calls=[{"name": active_tools[0].name, "args": {}, "id": f"read-{uuid4()}"}],
+            )
         if (final_response or state.get("tool_budget_exhausted")) and response.tool_calls:
             response = AIMessage(
                 content=(
@@ -504,6 +535,16 @@ def make_agent_node(
                 additional_kwargs={"error_code": "tool_budget_exceeded"},
             )
         if not response.tool_calls:
+            if voice:
+                response = response.model_copy(
+                    update={
+                        "content": format_voice_answer(
+                            extract_message_text(response.content),
+                            language=language,
+                            has_results=voice_turn_has_results(state),
+                        )
+                    }
+                )
             response.additional_kwargs.pop("execution_id", None)
             if configurable.get("execution_id"):
                 response.additional_kwargs["execution_id"] = configurable["execution_id"]
@@ -719,6 +760,11 @@ def make_tools_node(
         # Misma política que al enlazar: una tool fuera del canal no se ejecuta
         # aunque el modelo la pida (p. ej. argumentos/tool_calls manipulados).
         selected = filter_for_channel(_active_tools(tools, profile), channel)
+        record_tools = (
+            RECORD_TOPIC_TOOLS.get(state.get("record_topic"), ()) if channel == "voice" else ()
+        )
+        if record_tools:
+            selected = [tool for tool in selected if tool.name in record_tools]
         allowed = {tool.name for tool in selected}
         # Solo se admiten los campos públicos del esquema. Los selectores de
         # paciente siguen excluidos de cualquier lectura.
@@ -781,8 +827,10 @@ def make_tools_node(
                         if envelope.status == "ok":
                             actions.extend(a.model_dump(mode="json") for a in envelope.actions)
                             sources.extend(s for s in envelope.sources if isinstance(s, dict))
+        topics = {RECORD_TOOL_TOPICS[name] for name in executed if name in RECORD_TOOL_TOPICS}
         return {
             **result,
+            **({"record_topic": topics.pop()} if channel == "voice" and len(topics) == 1 else {}),
             "tool_call_count": used + len(calls),
             "tool_budget_exhausted": blocked or exhausted or used + len(calls) >= max_tool_calls,
             "tools_used": executed,

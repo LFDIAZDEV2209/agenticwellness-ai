@@ -110,6 +110,7 @@ class Settings(BaseSettings):
     # Modelo rápido para voz: el turno hablado prioriza latencia; el texto
     # conserva el modelo clínico completo. Si se deja vacío, usa el global.
     vita_voice_model: str = "claude-haiku-4-5-20251001"
+    vita_voice_max_tokens: int = Field(default=180, gt=0)
     # Adjuntos efímeros del chat Vita (Ola B, 6.1-6.5). Apagado por defecto en
     # todos los entornos: se activa explícitamente con VITA_ATTACHMENTS_ENABLED.
     vita_attachments_enabled: bool = False

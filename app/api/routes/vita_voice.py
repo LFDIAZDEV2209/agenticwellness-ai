@@ -11,7 +11,7 @@ from typing import Literal
 
 from anyio import CancelScope
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
-from langchain_core.messages import AIMessage, AIMessageChunk
+from langchain_core.messages import AIMessageChunk
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.api.deps import get_db_session, get_graph
@@ -31,6 +31,7 @@ from app.vita.client import VitaAccessError, read_catalog
 from app.vita.locking import ThreadBusyError
 from app.vita.runtime import resolve_turn
 from app.voice.context import verify_context
+from app.voice.delivery import VoiceSentenceEmitter, voice_turn_has_results
 from app.voice.input import compose_voice_input
 from app.voice.language import (
     conversation_language,
@@ -329,9 +330,13 @@ async def completion(
                     )
                     if replay_message is None:
                         raise VoiceContextError("voice_receipt_without_checkpoint", 409)
-                    yield _chunk(
-                        admission.response_message_id, extract_message_text(replay_message.content)
+                    text = VoiceSentenceEmitter(request.language).finish(
+                        extract_message_text(replay_message.content),
+                        has_results=voice_turn_has_results(current.values or {}),
+                        allow_standalone=True,
                     )
+                    if text:
+                        yield _chunk(admission.response_message_id, text)
                     yield _chunk(admission.response_message_id, done=True)
                     yield "data: [DONE]\n\n"
             except (VoiceContextError, ThreadBusyError) as exc:
@@ -371,6 +376,8 @@ async def completion(
         first_token_ms = None
         text_chars = 0
         state, completed = None, False
+        emitter = VoiceSentenceEmitter(request.language)
+        saw_text_chunk = False
         next_access_check = time.monotonic() + 1
         failure: str | None = None
         graph = AdmittedVoiceGraph(
@@ -404,15 +411,15 @@ async def completion(
                         message, metadata = chunk
                         if (
                             metadata.get("langgraph_node") == "answer"
-                            and isinstance(message, (AIMessage, AIMessageChunk))
+                            and isinstance(message, AIMessageChunk)
                             and not getattr(message, "tool_calls", None)
                             and not getattr(message, "tool_call_chunks", None)
-                            # LangGraph vuelve a emitir el AIMessage persistido
-                            # con nuestro ID estable al terminar los chunks del
-                            # modelo. Ese snapshot no es otro fragmento hablado.
-                            and (isinstance(message, AIMessageChunk) or first_token_ms is None)
                         ):
-                            text = extract_message_text(message.content)
+                            fragment = extract_message_text(message.content)
+                            if not fragment:
+                                continue
+                            saw_text_chunk = True
+                            text = emitter.feed(fragment)
                             if not text:
                                 continue
                             if first_token_ms is None:
@@ -422,10 +429,17 @@ async def completion(
                             yield _chunk(admission.response_message_id, text)
                 if state is None:
                     raise VoiceContextError("voice_stream_incomplete", 502)
-                if first_token_ms is None:
-                    first_token_ms = int((time.perf_counter() - started) * 1000)
+                # El snapshot final aporta frases formateadas que todavía
+                # caben. No se añade una cola sin cierre del stream del modelo.
+                text = emitter.finish(
+                    _extract_answer(state),
+                    has_results=voice_turn_has_results(state),
+                    allow_standalone=not saw_text_chunk,
+                )
+                if text:
+                    if first_token_ms is None:
+                        first_token_ms = int((time.perf_counter() - started) * 1000)
                     await voice_store.check_current(admission)
-                    text = _extract_answer(state)
                     text_chars += len(text)
                     yield _chunk(admission.response_message_id, text)
                 if not await voice_store.finish_admission(admission, "completed"):

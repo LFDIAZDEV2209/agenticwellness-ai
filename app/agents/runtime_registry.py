@@ -200,6 +200,7 @@ class AgentRuntimeRegistry:
         allow_patient_rag: bool = False,
         patient_retrieval: bool = False,
         allow_capture: bool = False,
+        record_topic: str | None = None,
     ) -> CompiledAgent:
         """Construye el grafo con los overrides del agente (provider/model/tools)."""
         try:
@@ -244,6 +245,7 @@ class AgentRuntimeRegistry:
             prepare_tools=prepare_tools,
             final_after_tools=final_after_tools,
             retrieval_scope="patient" if patient_retrieval else "program",
+            record_topic=record_topic,
             enable_memory=runtime_config.memory_config.enabled,
             checkpointer=(
                 await get_checkpointer()
@@ -296,6 +298,7 @@ class AgentRuntimeRegistry:
         allow_patient_rag: bool = False,
         patient_retrieval: bool = False,
         allow_capture: bool = False,
+        record_topic: str | None = None,
     ) -> CompiledAgent:
         """Overlay explícito SOLO tras autorización Vita; no cambia la config ERP.
 
@@ -308,7 +311,9 @@ class AgentRuntimeRegistry:
         # La voz prioriza latencia: usa el modelo rápido y omite temperature
         # (los modelos con thinking de Anthropic la rechazan).
         if channel == "voice":
-            voice_model = get_settings().vita_voice_model
+            settings = get_settings()
+            config.max_tokens = settings.vita_voice_max_tokens
+            voice_model = settings.vita_voice_model
             if voice_model:
                 config.model = voice_model
                 config.temperature = None
@@ -318,6 +323,10 @@ class AgentRuntimeRegistry:
             config.retrieval_config.enabled = True
             config.retrieval_config.knowledge_base_ids = list(global_knowledge_base_ids)
         names = {t.name for t in self._select_tools(config.tools, compiled.agent_type_id)}
+        if channel == "voice" and plan_record:
+            names.discard("retrieve_knowledge")
+            config.retrieval_config.enabled = False
+            allow_patient_rag = False
         granted = VITA_READ_TOOL_NAMES | (VITA_CAPTURE_TOOL_NAMES if allow_capture else set())
         config.tools = sorted((names - {"get_patient_data"} - VITA_CAPTURE_TOOL_NAMES) | granted)
         prepare = None
@@ -340,6 +349,7 @@ class AgentRuntimeRegistry:
             allow_patient_rag=allow_patient_rag,
             patient_retrieval=patient_retrieval,
             allow_capture=allow_capture,
+            record_topic=record_topic,
         )
 
 

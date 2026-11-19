@@ -16,7 +16,7 @@ from app.graph.graph import build_graph
 from app.llm.factory import get_chat_model
 from app.tools.registry import TOOLS_BY_NAME, legacy_tools
 from app.tools.retrieval import authorized_patient_id, make_retrieve_tool
-from app.tools.vita import VITA_READ_TOOL_NAMES, VITA_RECORD_TOOL_NAMES
+from app.tools.vita import RECORD_TOPIC_TOOLS, VITA_READ_TOOL_NAMES, VITA_RECORD_TOOL_NAMES
 from app.vita.capture import VITA_CAPTURE_TOOL_NAMES, has_pending_proposals
 from app.vita.client import VitaAccessError, read_catalog
 from app.vita.locking import LockedGraph
@@ -29,6 +29,10 @@ from app.vita.routing import (
     patient_record_query,
     select_agent,
     service_query,
+    voice_document_list_lookup,
+    voice_record_followup,
+    voice_record_lookup,
+    voice_record_topics,
 )
 
 
@@ -119,21 +123,38 @@ async def resolve_turn(
     capture = allow_capture and (capture_query(text) or has_pending_proposals(previous_state))
     if capture:
         patient_retrieval = False
-    record_followup = (
-        not scope
-        and not documentation
-        and VITA_RECORD_TOOL_NAMES.intersection(previous_state.get("tools_used", ()))
-    )
-    plan_record = capture or (
-        not service
-        and not patient_retrieval
-        and (patient_record_query(text) or bool(record_followup))
-    )
+    record_topic = None
+    record_query = patient_record_query(text)
+    if channel == "voice":
+        topics = voice_record_topics(text)
+        if private_query:
+            record_query = False
+        elif not (service or capture):
+            if documentation and not (topics == {"documents"} and voice_document_list_lookup(text)):
+                record_query = False
+            elif len(topics) == 1 and voice_record_lookup(text):
+                record_topic = next(iter(topics))
+            elif not (scope or topics or documentation or record_query or capture_query(text)):
+                prior_topic = previous_state.get("record_topic")
+                if prior_topic in RECORD_TOPIC_TOOLS and voice_record_followup(text):
+                    record_topic = prior_topic
+        record_query = record_query or record_topic is not None
+    else:
+        record_query = record_query or (
+            not scope
+            and not documentation
+            and bool(VITA_RECORD_TOOL_NAMES.intersection(previous_state.get("tools_used", ())))
+        )
+    plan_record = capture or (not service and not patient_retrieval and record_query)
+    voice_record_read = channel == "voice" and plan_record
     if plan_record or patient_retrieval:
         scope = None
     direct_read = scope is not None and capability_scope(text, unambiguous=True) is not None
     ground = (
-        not service and not private_query and (documentation or (scope is None and not plan_record))
+        not service
+        and not private_query
+        and not voice_record_read
+        and (documentation or (scope is None and not plan_record))
     )
     decision = await select_agent(
         text,
@@ -164,6 +185,7 @@ async def resolve_turn(
             allow_patient_rag=allow_patient_rag,
             patient_retrieval=patient_retrieval,
             allow_capture=allow_capture,
+            record_topic=record_topic,
         )
         cfg = compiled.runtime_config
         return ResolvedTurn(
@@ -193,15 +215,16 @@ async def resolve_turn(
     prepare = [f"get_my_{scope}"] if scope else []
     # Los saludos y ayudas de servicio permanecen inmediatos y sin RAG.
     ids = await resolve_knowledge_base_ids(session, "base", []) if ground else []
-    if allow_patient_rag:
+    if allow_patient_rag and not voice_record_read:
         tools.append(make_retrieve_tool(knowledge_base_ids=ids, allow_patient=True))
     elif ids:
         tools.append(make_retrieve_tool(knowledge_base_ids=ids))
     if ids or patient_retrieval:
         prepare.append("retrieve_knowledge")
     voice_model = settings.vita_voice_model if channel == "voice" else None
+    voice_options = {"max_tokens": settings.vita_voice_max_tokens} if channel == "voice" else {}
     graph = build_graph(
-        model=get_chat_model(model=voice_model, temperature=None),
+        model=get_chat_model(model=voice_model, temperature=None, **voice_options),
         checkpointer=base_graph.checkpointer,
         tools=tools,
         max_tool_calls=3,
@@ -211,6 +234,7 @@ async def resolve_turn(
         else None,
         final_after_tools=plan_record and channel == "voice",
         retrieval_scope="patient" if patient_retrieval else "program",
+        record_topic=record_topic,
     )
     return ResolvedTurn(
         LockedGraph(graph, "capability" if scope else decision.reason),

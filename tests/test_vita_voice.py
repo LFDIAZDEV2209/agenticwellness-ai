@@ -755,7 +755,7 @@ async def test_revocation_during_http_asgi_generation_cancels_tool(rig, caplog):
 
 class StreamingFinalModel(RecordingFakeModel):
     release: Any = Field(default_factory=asyncio.Event)
-    generation_complete: Any = Field(default_factory=asyncio.Event)
+    waiting_for_release: Any = Field(default_factory=asyncio.Event)
 
     async def _astream(self, messages, stop=None, run_manager=None, **kwargs):
         self.prompts.append(list(messages))
@@ -769,10 +769,13 @@ class StreamingFinalModel(RecordingFakeModel):
                 ]
             )
         )
-        yield ChatGenerationChunk(message=AIMessageChunk(content="Primero "))
+        yield ChatGenerationChunk(message=AIMessageChunk(content="**Tu resultado fue 9.**"))
+        yield ChatGenerationChunk(message=AIMessageChunk(content=" "))
+        self.waiting_for_release.set()
         await self.release.wait()
-        yield ChatGenerationChunk(message=AIMessageChunk(content="después"))
-        self.generation_complete.set()
+        yield ChatGenerationChunk(
+            message=AIMessageChunk(content="¿Te lo explico? Tercera frase. **DETALLE_RECORTADO.**")
+        )
 
 
 @pytest.mark.parametrize("outcome", ["complete", "revoke"])
@@ -980,7 +983,7 @@ async def test_changed_previous_prefix_is_rejected_with_safe_diagnostics(rig, ca
     assert "fixture" not in rejection and SECRET not in rejection
 
 
-async def test_http_asgi_first_final_token_precedes_generation_end_without_planning(rig):
+async def test_http_asgi_streams_first_chunk_before_generation_completes(rig):
     @tool
     def internal_read() -> str:
         """Lectura interna preparada en código, nunca narrada al proveedor."""
@@ -991,7 +994,7 @@ async def test_http_asgi_first_final_token_precedes_generation_end_without_plann
         model=model,
         tools=[internal_read],
         prepare_tools=["internal_read"],
-        checkpointer=MemorySaver(),
+        checkpointer=rig.graph.checkpointer,
     )
     rig.resolver.side_effect = None
     rig.resolver.return_value = ResolvedTurn(graph, "a", "v", "fake", "fake", 25, "explicit")
@@ -1032,25 +1035,29 @@ async def test_http_asgi_first_final_token_precedes_generation_end_without_plann
     async def send(message):
         if message["type"] == "http.response.body":
             bodies.append(message.get("body", b""))
-            if b"Primero" in bodies[-1]:
+            if b"Tu resultado fue 9." in bodies[-1]:
                 first_content.set()
 
     task = asyncio.create_task(rig.app(scope, receive, send))
     try:
+        await asyncio.wait_for(model.waiting_for_release.wait(), 3)
         await asyncio.wait_for(first_content.wait(), 3)
-        assert not model.generation_complete.is_set()
+        assert b"DETALLE_RECORTADO" not in b"".join(bodies)
+        assert rig.store.receipts[1].status == "running"
         assert not task.done()
     finally:
         model.release.set()
         await asyncio.wait_for(task, 3)
     response = b"".join(bodies).decode()
-    assert "Primero" in response and "después" in response
     spoken = "".join(
         json.loads(line[6:])["choices"][0]["delta"].get("content", "")
         for line in response.splitlines()
         if line.startswith("data: {")
     )
-    assert spoken == "Primero después"
+    snapshot = await graph.aget_state({"configurable": {"thread_id": "owner::shared"}})
+    assert spoken == "Tu resultado fue 9. ¿Te lo explico? Tercera frase."
+    assert snapshot.values["messages"][-1].content == spoken
+    assert "DETALLE_RECORTADO" not in response
     assert "INTERNAL_TOOL_PLANNING" not in response and "SECRET_REASONING" not in response
     assert len(model.prompts) == 1  # Sin generación de planificación ni reescritor.
     assert rig.store.receipts[1].status == "completed"
