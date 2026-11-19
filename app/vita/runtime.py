@@ -199,8 +199,9 @@ async def resolve_turn(
         tools.append(make_retrieve_tool(knowledge_base_ids=ids))
     if ids or patient_retrieval:
         prepare.append("retrieve_knowledge")
+    voice_model = settings.vita_voice_model if channel == "voice" else None
     graph = build_graph(
-        model=get_chat_model(temperature=None),
+        model=get_chat_model(model=voice_model, temperature=None),
         checkpointer=base_graph.checkpointer,
         tools=tools,
         max_tool_calls=3,
@@ -216,7 +217,7 @@ async def resolve_turn(
         "base",
         None,
         settings.llm_provider,
-        None,
+        voice_model,
         settings.recursion_limit,
         "capability" if scope else decision.reason,
     )

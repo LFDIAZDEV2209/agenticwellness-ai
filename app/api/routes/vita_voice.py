@@ -135,6 +135,13 @@ _OBSOLETE_MESSAGES = {
     "es": "No pude completar la respuesta anterior. ¿Me lo repites, por favor?",
     "en": "I couldn't finish the previous answer. Could you repeat it, please?",
 }
+# Muletillas de progreso para voz: se emiten si el primer token tarda más de
+# este umbral (tools/RAG/LLM). Evitan el silencio sin bloquear la respuesta.
+_VOICE_FILLERS = {
+    "es": "Claro, un momento. ",
+    "en": "One moment, let me check. ",
+}
+_VOICE_FILLER_DELAY_SECONDS = 1.2
 
 
 def _chunk(response_id: str, content: str | None = None, *, done=False) -> str:
@@ -386,6 +393,7 @@ async def completion(
         started = request_started
         first_token_ms = None
         text_chars = 0
+        filler_sent = False
         state, completed = None, False
         next_access_check = time.monotonic() + 1
         failure: str | None = None
@@ -410,6 +418,16 @@ async def completion(
                         if time.monotonic() >= next_access_check:
                             await read_catalog(record.user_id)
                             next_access_check = time.monotonic() + 1
+                        if (
+                            not filler_sent
+                            and first_token_ms is None
+                            and time.perf_counter() - started >= _VOICE_FILLER_DELAY_SECONDS
+                        ):
+                            filler_sent = True
+                            first_token_ms = int((time.perf_counter() - started) * 1000)
+                            filler = _VOICE_FILLERS.get(request.language, _VOICE_FILLERS["es"])
+                            text_chars += len(filler)
+                            yield _chunk(admission.response_message_id, filler)
                     try:
                         mode, chunk = pending.result()
                     except StopAsyncIteration:

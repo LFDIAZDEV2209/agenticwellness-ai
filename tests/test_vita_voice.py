@@ -40,6 +40,12 @@ SECRET, SERVICE_KEY = "context-fixture-" * 3, "service-fixture-" * 3
 SESSION_ID = "11111111-1111-1111-1111-111111111111"
 
 
+def test_voice_fillers_are_bilingual_and_short():
+    assert "Claro, un momento" in vita_voice._VOICE_FILLERS["es"]
+    assert "One moment" in vita_voice._VOICE_FILLERS["en"]
+    assert 0 < vita_voice._VOICE_FILLER_DELAY_SECONDS <= 2
+
+
 class SimulatedStore:
     """Solo doble contractual, sin pretensión de representar locks entre réplicas."""
 
