@@ -48,32 +48,21 @@ def test_decimal_time_and_units_survive_chunk_boundaries(language, fragments, se
     assert emitter.finish(saved, has_results=True) == ""
 
 
-@pytest.mark.parametrize("has_results,limit", [(True, 40), (False, 50)])
-def test_word_cap_keeps_a_sentence_at_the_limit_and_drops_everything_after(has_results, limit):
-    # El hilo conserva todas las instrucciones urgentes. Aísla el tope del SSE
-    # para comprobarlo incluso cuando el texto guardado supera el presupuesto.
-    first = "Call emergency services now."
-    second = " ".join(["instruction"] * (limit - len(first.split()))) + "."
-    raw = f"{first} {second} Stay nearby."
-    saved = format_voice_answer(raw, language="en", has_results=has_results)
+def test_urgent_instructions_are_preserved_beyond_the_budget():
+    # Las instrucciones de seguridad no se recortan nunca; el audio y el hilo
+    # conservan el texto completo.
+    raw = "Call emergency services now. " + " ".join(["instruction"] * 45) + ". Stay nearby."
+    saved = format_voice_answer(raw, language="en", has_results=True)
     emitter = VoiceSentenceEmitter("en")
-
-    assert emitter.feed(first + " ") == first
-    partial = emitter.feed(second + " Stay nearby.")
-    spoken = first + partial + emitter.finish(saved, has_results=has_results)
-
-    assert saved == raw
-    assert spoken == f"{first} {second}"
-    assert len(spoken.split()) == limit
-
-
-def test_emitter_stops_at_three_sentences_even_if_the_saved_answer_is_longer():
-    emitter = VoiceSentenceEmitter("es")
-    raw = "Llama a emergencias ahora. Busca ayuda. Quédate aquí. Sigue las indicaciones."
-    saved = format_voice_answer(raw, language="es", has_results=True)
     spoken = emitter.feed(raw + " ") + emitter.finish(saved, has_results=True)
-    assert spoken == "Llama a emergencias ahora. Busca ayuda. Quédate aquí."
     assert saved == raw
+    assert spoken == raw
+
+
+def test_non_urgent_answer_is_capped_to_three_sentences():
+    raw = "Uno es el primero. Dos es el segundo. Tres es el tercero. Cuatro es el cuarto."
+    saved = format_voice_answer(raw, language="es", has_results=True)
+    assert saved == "Uno es el primero. Dos es el segundo. Tres es el tercero."
 
 
 @pytest.mark.parametrize(
@@ -102,3 +91,72 @@ def test_every_increment_is_an_exact_prefix_of_the_formatted_answer(language, ra
     spoken += emitter.finish(saved, has_results=True)
     assert saved.startswith(spoken)
     assert spoken
+
+
+def test_bullets_keep_the_first_three_items_without_dangling_colon():
+    raw = (
+        "Puedo ayudarte con:\n"
+        "- Revisar tus signos vitales y actividad.\n"
+        "- Resultados de tus tests.\n"
+        "- Tu plan nutricional.\n"
+        "- Tus documentos."
+    )
+    spoken = format_voice_answer(raw, language="es", has_results=False)
+    assert "revisar tus signos vitales" in spoken.lower()
+    assert "resultados de tus tests" in spoken.lower()
+    assert "plan nutricional" in spoken.lower()
+    assert "documentos" not in spoken.lower()
+    assert not spoken.endswith(":")
+    assert "ayudarte con:" not in spoken
+
+
+def test_vitals_paragraph_humanizes_date_and_keeps_two_metrics():
+    raw = (
+        "Listo. Aquí están tus últimos datos del wearable:\n"
+        "Ayer, 18 de nov (12:00): 2,306 calorías quemadas, 1,806 pasos, 1,324 metros."
+    )
+    spoken = format_voice_answer(raw, language="es", has_results=True)
+    assert "Ayer, 2.306 calorías quemadas y 1.806 pasos." in spoken
+    assert "(12:00)" not in spoken
+    assert "1.324 metros" not in spoken
+    assert "18 de noviembre" not in spoken
+
+
+def test_month_abbreviation_is_spoken_in_full():
+    spoken = format_voice_answer(
+        "Tu evaluación inicial fue el 5 de nov.", language="es", has_results=True
+    )
+    assert "5 de noviembre" in spoken
+
+
+def test_parenthetical_score_reads_as_clarification():
+    spoken = format_voice_answer(
+        "Riesgo cardiometabólico: 54.17 (alto).", language="es", has_results=True
+    )
+    assert "54.17, alto" in spoken
+    assert "(" not in spoken
+
+
+def test_chat_offer_is_not_spoken():
+    spoken = format_voice_answer(
+        "Tus resultados están listos. Más detalles por chat.",
+        language="es",
+        has_results=True,
+    )
+    assert "por chat" not in spoken.lower()
+    assert "resultados están listos" in spoken
+
+
+def test_english_metric_list_uses_and():
+    spoken = format_voice_answer(
+        "Nov 18: 2,306 calories burned, 1,806 steps, 1,324 meters.",
+        language="en",
+        has_results=True,
+    )
+    assert "2,306 calories burned and 1,806 steps." in spoken
+    assert "meters" not in spoken
+
+
+def test_empty_answer_stays_empty():
+    assert format_voice_answer("   ", language="es", has_results=True) == ""
+    assert format_voice_answer("", language="en", has_results=False) == ""

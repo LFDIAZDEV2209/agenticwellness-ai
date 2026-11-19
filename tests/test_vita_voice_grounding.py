@@ -324,7 +324,10 @@ async def test_nine_assessment_results_are_summarized_in_voice(
     if channel == "voice":
         assert len(answer.split()) <= 40
         assert 3 <= answer.count(title) <= 5
-        assert answer.count(".") == 2 and "chat" in answer
+        # La voz no ofrece «más detalles por chat»: el detalle llega en el
+        # siguiente turno. Se dicen tres elementos como máximo.
+        assert answer.count(".") == 3
+        assert "chat" not in answer.lower()
         assert not any(marker in answer for marker in ("##", "**", "\n-"))
     else:
         assert answer == lengthy
