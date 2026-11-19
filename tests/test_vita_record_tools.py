@@ -43,6 +43,11 @@ WEIGHT = {
     "unitSymbol": "kg",
     "source": "patient",
 }
+HEALTH_TEST_WEIGHT = {
+    **WEIGHT,
+    "source": "health_test",
+    "observedAt": "2026-11-16T13:00:00Z",
+}
 HEIGHT = {
     **POINT,
     "metricCode": "height",
@@ -195,6 +200,11 @@ def test_schema_y_descripcion_convertibles(name, provider):
         ("profile", PROFILE, "ok"),
         ("profile", {**PROFILE, "goals": None}, "ok"),
         ("vitals", VITALS, "ok"),
+        (
+            "vitals",
+            {**VITALS, "latest": [HEALTH_TEST_WEIGHT], "history": [HEALTH_TEST_WEIGHT]},
+            "ok",
+        ),
         ("vitals", {**VITALS, "latest": [], "history": []}, "empty"),
         ("medications", MEDICATIONS, "ok"),
         ("medications", {**MEDICATIONS, "treatments": []}, "empty"),

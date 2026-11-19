@@ -76,7 +76,7 @@ class VitalsArguments(EmptyArguments):
 RecordResource = Literal[
     "profile", "vitals", "medications", "nutrition", "assessments", "documents"
 ]
-MeasurementSource = Literal["device", "patient", "professional", "lab"]
+MeasurementSource = Literal["device", "patient", "professional", "lab", "health_test", "legacy"]
 JsonNumber = StrictInt | Annotated[float, Field(strict=True, allow_inf_nan=False)]
 
 

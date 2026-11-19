@@ -192,6 +192,19 @@ async def test_provider_failure_is_unavailable_and_logs_no_content(caplog):
     assert PHI_MARKER not in caplog.text
 
 
+def test_large_image_is_downscaled_before_vision():
+    from io import BytesIO
+
+    from PIL import Image
+
+    source = BytesIO()
+    Image.new("RGB", (9000, 1200), "white").save(source, format="PNG")
+    mime, prepared = attachment_context._prepare_image("image/png", source.getvalue())
+    assert mime == "image/png"
+    with Image.open(BytesIO(prepared)) as image:
+        assert max(image.size) <= attachment_context._VISION_MAX_SIDE
+
+
 async def test_extraction_timeout_is_unavailable(monkeypatch):
     import asyncio
 

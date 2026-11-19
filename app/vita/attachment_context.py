@@ -24,6 +24,7 @@ from typing import Literal
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
+from PIL import Image, ImageOps, UnidentifiedImageError
 
 from app.api.message_text import extract_message_text
 from app.core.config import get_settings
@@ -41,6 +42,11 @@ Method = Literal["pdf_text", "vision", "none"]
 # Un PDF con menos texto que esto se trata como escaneado.
 _MIN_DIGITAL_TEXT_CHARS = 20
 UNREADABLE_SENTINEL = "ILEGIBLE"
+# Límites del proveedor de visión: 8000 px por lado y 10 MB de base64 por
+# imagen. Se reduce antes de enviar para no fallar con fotos o capturas
+# largas; 2048 px conserva texto pequeño sin acercarse a los límites.
+_VISION_MAX_SIDE = 2048
+_VISION_MAX_BASE64_BYTES = 10_000_000
 
 OCR_SYSTEM_PROMPT = f"""You are a transcription engine. Transcribe the visible text of the
 supplied image(s) faithfully, in the original language, preserving numbers, units, dates and
@@ -159,12 +165,41 @@ def _pdf_images(content: bytes, limit: int) -> list[tuple[str, bytes]]:
     return found
 
 
+def _prepare_image(mime: str, data: bytes) -> tuple[str, bytes]:
+    """Reduce y recomprime para respetar los límites del proveedor de visión.
+
+    El proveedor rechaza imágenes con un lado > 8000 px o base64 > 10 MB. Las
+    fotos y capturas largas del móvil superan ambos con facilidad. Si Pillow no
+    puede abrir el archivo se devuelve el original: el extractor lo marcará como
+    no legible en vez de inventar contenido.
+    """
+    try:
+        with Image.open(io.BytesIO(data)) as source:
+            image = ImageOps.exif_transpose(source)
+            if max(image.size) > _VISION_MAX_SIDE:
+                image.thumbnail((_VISION_MAX_SIDE, _VISION_MAX_SIDE), Image.Resampling.LANCZOS)
+            output = io.BytesIO()
+            if mime == "image/png":
+                if image.mode not in {"RGB", "RGBA", "L", "LA"}:
+                    image = image.convert("RGBA")
+                image.save(output, format="PNG", optimize=True)
+                return "image/png", output.getvalue()
+            image = image.convert("RGB")
+            image.save(output, format="JPEG", quality=86, optimize=True)
+            return "image/jpeg", output.getvalue()
+    except (UnidentifiedImageError, OSError, ValueError):
+        return mime, data
+
+
 async def _vision_text(
     images: Sequence[tuple[str, bytes]], model_factory: Callable[[], BaseChatModel]
 ) -> tuple[ReadStatus, str]:
     blocks: list[dict] = [{"type": "text", "text": "Transcribe the attached image(s)."}]
     for mime, data in images:
+        mime, data = _prepare_image(mime, data)
         encoded = base64.b64encode(data).decode("ascii")
+        if len(encoded) > _VISION_MAX_BASE64_BYTES:
+            return "unreadable", ""
         blocks.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{encoded}"}})
     model = model_factory()
     response = await model.ainvoke(
@@ -206,10 +241,17 @@ async def extract_attachment(
         raise
     except Exception as exc:
         # Proveedor caído, timeout, sin configuración o PDF dañado: no se inventa.
+        # Solo se registra el mensaje del proveedor: nunca contenido del archivo.
+        provider_detail = (
+            str(exc)[:240]
+            if type(exc).__name__ in {"AnthropicInvalidRequestError", "BadRequestError"}
+            else ""
+        )
         logger.warning(
-            "vita_attachment_extraction_failed attachment=%s error=%s",
+            "vita_attachment_extraction_failed attachment=%s error=%s detail=%s",
             attachment_id,
             type(exc).__name__,
+            provider_detail,
         )
         return ExtractedAttachment(attachment_id, row.kind, "unavailable", "none")
 

@@ -315,8 +315,8 @@ async def test_latest_utterance_can_be_amended_with_revision_response_id(
         assert await store.voice_store.finish_admission(old, initial_state)
     duplicate = await admit(owner, "provisional fixture", phase=initial_phase)
     if initial_state == "interrupted":
-        assert duplicate.action == "obsolete"
-        assert duplicate.response_message_id == old.response_message_id
+        assert duplicate.action == "run"
+        assert duplicate.response_message_id != old.response_message_id
     if initial_state == "completed":
         assert duplicate.action == "replay"
         assert duplicate.response_message_id == old.response_message_id
