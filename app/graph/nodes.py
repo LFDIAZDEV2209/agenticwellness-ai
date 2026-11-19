@@ -22,7 +22,9 @@ from app.agents.prompts import (
     PATIENT_SCOPE_POLICY,
     SERVICE_DELIVERY_POLICY,
     TEXT_DELIVERY_POLICY,
+    VITA_CAPTURE_POLICY,
     VOICE_DELIVERY_POLICY,
+    WHATSAPP_FORMAT_POLICY,
     WHATSAPP_SCOPE_POLICY,
     build_control_guidance,
     build_language_instruction,
@@ -39,6 +41,7 @@ from app.tools.catalog import conversion_failures, tool_label
 from app.tools.policy import TOOL_SPECS, filter_for_channel, resolve_channel, spec_for
 from app.tools.registry import TOOLS_BY_NAME, legacy_tools, patient_tools
 from app.tools.vita import VITA_TOOL_ARGUMENTS
+from app.vita.capture import VITA_CAPTURE_TOOL_NAMES
 from app.vita.context_builder import (
     MESSAGE_OVERHEAD_TOKENS,
     ContextBudget,
@@ -101,6 +104,10 @@ def guardrails_node(state: AgentState) -> dict:
         "channel": configurable.get("message_channel", "text"),
         "status": "generated" if configurable.get("message_channel") == "voice" else "final",
     }
+    if configurable.get("channel_message_id"):
+        # Referencia del proveedor (p. ej. `wamid`): permite deduplicar y enlazar el
+        # mensaje del hilo compartido con la app sin copiar contenido.
+        message_metadata["channel_message_id"] = configurable["channel_message_id"]
     if configurable.get("voice_session_id"):
         message_metadata["voice_session_id"] = configurable["voice_session_id"]
         message_metadata["source"] = "vita_runtime"
@@ -401,11 +408,11 @@ def make_agent_node(
             else message
             for message in history
         ]
+        channel = resolve_channel(configurable, profile.key if profile else None)
         system_blocks = [
-            # Alcance por canal: WhatsApp no ofrece agendamiento, la app sí.
-            WHATSAPP_SCOPE_POLICY
-            if profile is not None and profile.key == "whatsapp"
-            else PATIENT_SCOPE_POLICY
+            # Alcance por canal (también con especialistas del runtime Vita): WhatsApp
+            # no ofrece agendamiento.
+            WHATSAPP_SCOPE_POLICY if channel == "whatsapp" else PATIENT_SCOPE_POLICY
         ]
         if final_response:
             system_blocks.append(
@@ -450,6 +457,11 @@ def make_agent_node(
                 system_blocks.append(TEXT_DELIVERY_POLICY)
             if service_query(state.get("input", "")):
                 system_blocks.append(SERVICE_DELIVERY_POLICY)
+        if channel == "whatsapp" and not (profile is not None and profile.key == "whatsapp"):
+            # El perfil legado ya lo trae en su prompt; los agentes Vita no.
+            system_blocks.append(WHATSAPP_FORMAT_POLICY)
+        if not final_response and any(t.name in VITA_CAPTURE_TOOL_NAMES for t in active_tools):
+            system_blocks.append(VITA_CAPTURE_POLICY)
 
         # Adjuntos efímeros (Ola B): política de datos no confiables por turno.
         attachments = configurable.get("vita_attachments")

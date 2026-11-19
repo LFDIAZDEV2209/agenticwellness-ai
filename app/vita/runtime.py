@@ -17,11 +17,13 @@ from app.llm.factory import get_chat_model
 from app.tools.registry import TOOLS_BY_NAME, legacy_tools
 from app.tools.retrieval import authorized_patient_id, make_retrieve_tool
 from app.tools.vita import VITA_READ_TOOL_NAMES, VITA_RECORD_TOOL_NAMES
+from app.vita.capture import VITA_CAPTURE_TOOL_NAMES, has_pending_proposals
 from app.vita.client import VitaAccessError, read_catalog
 from app.vita.locking import LockedGraph
 from app.vita.routing import (
     AuthorizedAgent,
     capability_scope,
+    capture_query,
     documentation_query,
     patient_document_query,
     patient_record_query,
@@ -105,17 +107,24 @@ async def resolve_turn(
     private_query = patient_document_query(text)
     configurable = config["configurable"]
     allow_patient_rag = (
-        channel in {"text", "voice"}
+        channel in {"text", "voice", "whatsapp"}
         and configurable.get("user_id") == user_id
         and authorized_patient_id(configurable) is not None
     )
     patient_retrieval = not service and private_query and allow_patient_rag
+    # Captura confirmada: reporte de un dato o respuesta a una propuesta del turno
+    # anterior. Usa el planificador con tools (no lecturas preparadas) en los tres
+    # canales; la voz sigue respondiendo desde `answer` tras las tools.
+    allow_capture = get_settings().vita_capture_enabled and configurable.get("user_id") == user_id
+    capture = allow_capture and (capture_query(text) or has_pending_proposals(previous_state))
+    if capture:
+        patient_retrieval = False
     record_followup = (
         not scope
         and not documentation
         and VITA_RECORD_TOOL_NAMES.intersection(previous_state.get("tools_used", ()))
     )
-    plan_record = (
+    plan_record = capture or (
         not service
         and not patient_retrieval
         and (patient_record_query(text) or bool(record_followup))
@@ -154,6 +163,7 @@ async def resolve_turn(
             global_knowledge_base_ids=global_ids,
             allow_patient_rag=allow_patient_rag,
             patient_retrieval=patient_retrieval,
+            allow_capture=allow_capture,
         )
         cfg = compiled.runtime_config
         return ResolvedTurn(
@@ -175,6 +185,8 @@ async def resolve_turn(
             *[TOOLS_BY_NAME[name] for name in sorted(VITA_READ_TOOL_NAMES)],
         ]
     )
+    if allow_capture:
+        tools.extend(TOOLS_BY_NAME[name] for name in sorted(VITA_CAPTURE_TOOL_NAMES))
     settings = get_settings()
     # La ruta general también usa el catálogo ERP: únicamente KBs Global
     # activas, nunca documentos de un especialista que no fue seleccionado.
@@ -213,6 +225,9 @@ async def resolve_turn(
 async def resolve_chat_turn(request, session, base_graph, thread_id: str) -> ResolvedTurn:
     from app.api.routes.chat import _build_config
 
+    # `whatsapp` es el perfil legado del canal, no un especialista del catálogo:
+    # como explícito rechazaría el turno (agent_not_authorized).
+    explicit = request.agent_type_id or request.agent
     try:
         return await resolve_turn(
             user_id=request.user_id or "",
@@ -220,7 +235,8 @@ async def resolve_chat_turn(request, session, base_graph, thread_id: str) -> Res
             session=session,
             base_graph=base_graph,
             config=_build_config(thread_id, request),
-            explicit=request.agent_type_id or request.agent,
+            explicit=None if explicit == "whatsapp" else explicit,
+            channel=request.channel or "text",
         )
     except (AgentRuntimeError, ValueError) as exc:
         raise VitaAccessError("vita_agent_not_authorized_or_unavailable") from exc

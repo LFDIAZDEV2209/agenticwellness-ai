@@ -14,7 +14,6 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.db.engine import async_session
 from app.rag.pgvector_store import RagScope
 from app.rag.retriever import PgVectorRetriever
-from app.tools.policy import resolve_channel
 
 logger = logging.getLogger(__name__)
 
@@ -42,8 +41,8 @@ class RetrieveArguments(BaseModel):
 
 
 def authorized_patient_id(configurable: Mapping) -> str | None:
-    """El ID proviene del backend o de la sesión de voz verificada."""
-    if not configurable.get("user_id") or resolve_channel(configurable) == "whatsapp":
+    """El ID proviene del backend (JWT o vínculo WhatsApp firmado) o de la sesión de voz."""
+    if not configurable.get("user_id"):
         return None
     try:
         patient = UUID(str(configurable.get("patient_id")))

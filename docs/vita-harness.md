@@ -11,7 +11,7 @@ los nodos, el checkpointer y las políticas de ejecución. [Ensamblado del grafo
 | --- | --- | --- | --- |
 | App · `POST /api/v1/chat/stream` con `X-Internal-Key`. `supports_vita` y el flag del runtime activan el catálogo de paciente. | Vita resuelve un perfil publicado y autorizado o el asistente general. Inyecta `get_my_day`, `get_my_nutrition`, `get_my_assessments`, `get_my_podcast`, `get_my_exercise` y `get_my_progress`, o la lectura del ámbito detectado. RAG usa las bases de conocimiento autorizadas. El camino legado usa el perfil solicitado o el supervisor. `mark_control_declined` se usa en la app con un contexto de control activo. | Generación de Vita 20 s por defecto. Camino legado 90 s. Lecturas HTTP de Vita 3 s por defecto y clasificador opcional 2 s. | SSE `start`, `message`, `node`, `flow`, `done` y, cuando corresponde, `control_signal`. `done` transporta acciones, fuentes y referencias de ejecución. Sin identidad en el flujo Vita se rechaza con 403. Un hilo ocupado en la preparación puede devolver 409. Fallos de runtime previos al stream pueden devolver 503. Un fallo en generación emite `error`. |
 | Voz · `POST /internal/voice/v1/chat/completions` con bearer de servicio, sesión firmada, conversación y contador. | Selección con el mismo catálogo de paciente que el chat Vita. Usa lecturas preparadas para ámbitos directos y RAG autorizado si aplica. En consultas de ficha, el modelo elige las tools y `answer` genera el audio con sus resultados. El cambio de idioma es un control del adaptador. | Hasta 20 s por defecto para esperar una admisión o ejecutar la generación, por separado. El proveedor tiene su propio límite de cascada. | SSE compatible con OpenAI, con `chat.completion.chunk` y `[DONE]`. Reintentos del mismo turno pueden reutilizar su respuesta. Firma, sesión o vínculo inválidos devuelven 401/403 según el control. Un conflicto de admisión o hilo puede devolver 409. Fallos de preparación o espera pueden devolver 503. Una interrupción durante generación emite un código fijo en SSE. |
-| WhatsApp · el backend llama a `POST /api/v1/chat` con `agent=whatsapp`. | Perfil legado `whatsapp` con prompt breve de educación en salud y dos tools, `calculate` y `get_current_time`. El overlay de lecturas de app y voz queda pendiente para este perfil. | Generación legada 90 s por defecto en el AI Service. El transporte del backend tiene su propio plazo. | JSON de `ChatResponse` con respuesta, `thread_id`, herramientas y `execution_id`. El guard de catálogo devuelve texto seguro. Fallos de proveedor o timeout conservan el error HTTP del adaptador. La entrega de la respuesta de respaldo pertenece al backend de WhatsApp. |
+| WhatsApp · el backend llama a `POST /api/v1/chat` con `agent=whatsapp`, `supports_vita=true`, `channel=whatsapp` y `channel_message_id=<wamid>`. | Con `VITA_RUNTIME_ENABLED` y `VITA_WHATSAPP_ENABLED` (por defecto activo) usa el mismo runtime Vita que la app: catálogo autorizado (elegibilidad de texto), lecturas de ficha, RAG de programa y expediente y captura confirmada. Alcance sin agendamiento y formato de mensajería por canal. Comparte el hilo y el corte mensual de la app. Sin `supports_vita` o con el flag apagado vuelve al perfil legado (`calculate`, `get_current_time`). Adjuntos por WhatsApp quedan para 6.6. | Generación de Vita 20 s por defecto; camino legado 90 s. El transporte del backend tiene su propio plazo. | JSON de `ChatResponse` con respuesta, `thread_id`, herramientas y `execution_id`. El guard de catálogo devuelve texto seguro. Fallos de proveedor o timeout conservan el error HTTP del adaptador. La entrega de la respuesta de respaldo pertenece al backend de WhatsApp. |
 
 Rutas y configuración de la matriz. [Chat SSE y JSON](../app/api/routes/chat.py) ·
 [Custom LLM de voz](../app/api/routes/vita_voice.py) · [Resolución Vita](../app/vita/runtime.py) ·
@@ -60,7 +60,9 @@ pueden usar estas lecturas cuando el turno pide datos personales.
 Un saludo no prepara lecturas. En voz, la selección para consultas de ficha puede
 añadir una invocación al modelo. La respuesta al paciente se genera después de la
 lectura. El presupuesto del harness acota los resultados largos al armar el prompt.
-WhatsApp conserva su catálogo actual.
+WhatsApp tiene la misma matriz que chat y voz (KAN-74 8.1). Siguen fuera de WhatsApp
+`get_patient_data` (perfil legado) y `mark_control_declined` (controles de la app);
+`suggest_appointment` sigue retirada en todos los canales.
 [Registro](../app/tools/vita.py) · [DTOs](../app/vita/contracts.py)
 
 El cliente distingue perfil inactivo, acceso de medicación deshabilitado y
@@ -102,3 +104,36 @@ admisión de generación en voz. Los replays reutilizan el turno de voz. `downgr
 event log y sus datos. La aceptación de audio remoto y de entrega entrante por WhatsApp requiere
 probar con los proveedores.
 [Pruebas del harness](../tests/test_vita_harness.py) · [Prueba de PostgreSQL y rollback](../tests/test_vita_turn_log_postgres.py)
+
+## Captura confirmada · KAN-70
+
+Las tools `record_measurement`, `record_medication_dose`, `record_meal` y `record_checkin`
+solo **proponen**: llaman a `POST /api/v1/internal/vita/capture/propose` y devuelven al modelo
+los valores canónicos. El token AES-GCM queda en el `artifact` del ToolMessage (checkpointer);
+no forma parte del texto que ve el modelo, del payload al proveedor ni de la API de hilos.
+
+`confirm_capture` es la única que escribe (`capture/confirm`) y lo hace solo si:
+
+1. hay propuestas vigentes del **turno inmediatamente anterior** (nunca del mismo turno);
+2. el mensaje actual del paciente es una confirmación explícita y breve, evaluada en código
+   (sin cifras, negaciones ni matices; en voz se evalúa la última frase transcrita);
+3. el canal coincide con el de la propuesta; un valor inusual exige `confirmed_unusual`.
+
+Identidad y procedencia salen del turno autenticado: `userId` del `configurable`, canal
+`vita_chat`/`vita_voice`/`vita_whatsapp` y `turnId` determinista (`wamid`, ID del mensaje de
+voz o `execution_id`, más un resumen del contenido; SHA-256 si supera 256 caracteres). El
+recibo único `(paciente, canal, turnId, tool)` de BACK hace idempotente el reintento. Un fallo
+transitorio de la confirmación conserva la propuesta para que el siguiente «sí» reintente con
+el mismo token y `turnId`.
+
+Un reporte de dato (`capture_query`) o la respuesta a una propuesta pendiente enrutan el turno
+al planificador con tools en los tres canales; en voz, `answer` genera el audio tras las tools.
+Las tools solo las concede el overlay Vita: una config ERP que las liste no las activa.
+Flags: `VITA_CAPTURE_ENABLED` en AI y `Vita:CaptureEnabled` en BACK (apagado, la propuesta
+responde 404 y la tool informa que no está disponible).
+
+Límite conocido: si la llamada se corta justo durante `confirm_capture`, el turno interrumpido
+se descarta y la propuesta deja de estar pendiente; el paciente debe repetir el dato y BACK
+recibe un `turnId` nuevo.
+[Contrato](../app/vita/capture.py) · [Tools](../app/tools/vita_capture.py) ·
+[Pruebas](../tests/test_vita_capture.py)

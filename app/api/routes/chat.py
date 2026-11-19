@@ -41,7 +41,6 @@ from app.observability.turn_trace import (
     persist_turn,
 )
 from app.safety.guardrails import RateLimiter
-from app.tools.policy import resolve_channel
 from app.vita.locking import ThreadBusyError
 from app.voice.store import VoiceContextError
 
@@ -134,7 +133,11 @@ def _build_config(
     # Aislamiento multi-agente: el checkpointer y las tools separan el estado
     # por usuario/paciente/instancia además del thread.
     if request is not None:
-        configurable["message_channel"] = resolve_channel({}, request.agent)
+        # El canal viene fijado en el request (no de `agent`, que el routing de
+        # Vita reescribe con el especialista elegido).
+        configurable["message_channel"] = request.channel
+        if request.channel_message_id:
+            configurable["channel_message_id"] = request.channel_message_id
         if request.user_id:
             configurable["user_id"] = request.user_id
         if request.patient_id:
@@ -158,20 +161,33 @@ def _build_config(
     }
 
 
+def _vita_channel_enabled(request: ChatRequest) -> bool:
+    """WhatsApp entra al runtime Vita solo con su flag y un usuario vinculado.
+
+    Un vínculo sin cuenta de la app (sin `user_id`) conserva el perfil legado en vez
+    de recibir 403: el paciente sigue teniendo respuesta educativa por WhatsApp.
+    """
+    if request.channel != "whatsapp":
+        return True
+    return get_settings().vita_whatsapp_enabled and bool(request.user_id)
+
+
 def _is_vita_request(request: ChatRequest) -> bool:
     return (
         get_settings().vita_runtime_enabled
         and request.supports_vita
-        and request.agent != "whatsapp"
+        and _vita_channel_enabled(request)
     )
 
 
 def _history_opt_in(request: ChatRequest) -> bool:
-    return request.supports_vita and request.agent != "whatsapp"
+    # WhatsApp comparte el hilo Vita de la app: participa del mismo corte
+    # mensual/revisión para no escribir sobre un historial pendiente de reset.
+    return request.supports_vita and _vita_channel_enabled(request)
 
 
 def _redact_execution(request: ChatRequest) -> bool:
-    return _history_opt_in(request) or request.agent == "whatsapp"
+    return _history_opt_in(request) or request.channel == "whatsapp"
 
 
 async def _prepare_chat_history(request: ChatRequest, thread_id: str, graph):
@@ -199,6 +215,9 @@ async def _prepare_attachments(request: ChatRequest, thread_id: str, session):
     """
     if not request.attachment_ids:
         return None
+    if request.channel != "text":
+        # Adjuntos por WhatsApp pertenecen a 6.6; aquí solo el chat de la app.
+        raise HTTPException(status_code=403, detail="vita_identity_required")
     if not get_settings().vita_attachments_enabled:
         raise HTTPException(status_code=403, detail="vita_attachments_disabled")
     from app.tools.retrieval import authorized_patient_id
@@ -344,7 +363,7 @@ def _turn_collector(request: ChatRequest, thread_id: str, execution_id: str) -> 
     """Traza técnica del turno (sin contenido); el canal sale de la política única."""
     return TurnTraceCollector(
         thread_id=_storage_thread_id(request.user_id, thread_id),
-        channel=resolve_channel({}, request.agent),
+        channel=request.channel or "text",
         patient_id=request.patient_id or request.user_id,
         agent_id=request.agent_type_id or request.agent or "base",
         execution_id=execution_id,

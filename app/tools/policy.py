@@ -63,6 +63,7 @@ TOOL_SPECS: Mapping[str, ToolSpec] = {
     for spec in (
         ToolSpec("calculate", max_calls_per_turn=3, deadline_seconds=1.0),
         ToolSpec("get_current_time", max_calls_per_turn=2, deadline_seconds=1.0),
+        # Perfil legado: WhatsApp usa las lecturas Vita por alcance.
         _read("get_patient_data", APP_CHANNELS),
         # Flujo de controles del programa: solo existe en la app (chat de texto).
         ToolSpec(
@@ -80,13 +81,25 @@ TOOL_SPECS: Mapping[str, ToolSpec] = {
         _read("get_my_exercise"),
         _read("get_my_progress"),
         ToolSpec("retrieve_knowledge", max_calls_per_turn=2, deadline_seconds=3.0, retries=1),
-        _read("get_my_profile", APP_CHANNELS),
-        _read("get_my_vitals", APP_CHANNELS),
-        _read("get_my_medications", APP_CHANNELS),
-        _read("get_my_nutrition_plan", APP_CHANNELS),
-        _read("get_my_assessment_results", APP_CHANNELS),
-        _read("list_my_documents", APP_CHANNELS),
-        ToolSpec("read_my_document", APP_CHANNELS, max_calls_per_turn=1, deadline_seconds=8),
+        # Lecturas del expediente: paridad app/voz/WhatsApp (KAN-74 8.1). La
+        # identidad sale del turno autenticado por BACK, nunca de argumentos.
+        _read("get_my_profile"),
+        _read("get_my_vitals"),
+        _read("get_my_medications"),
+        _read("get_my_nutrition_plan"),
+        _read("get_my_assessment_results"),
+        _read("list_my_documents"),
+        ToolSpec("read_my_document", max_calls_per_turn=1, deadline_seconds=8),
+        # Captura confirmada (KAN-70): misma política en los tres canales. Proponer no
+        # escribe (sin reintento: un timeout se resuelve con una propuesta nueva); la
+        # presión arterial necesita dos mediciones en el mismo turno.
+        ToolSpec("record_measurement", max_calls_per_turn=2, deadline_seconds=3.0),
+        ToolSpec("record_medication_dose", max_calls_per_turn=2, deadline_seconds=3.0),
+        ToolSpec("record_meal", max_calls_per_turn=1, deadline_seconds=3.0),
+        ToolSpec("record_checkin", max_calls_per_turn=1, deadline_seconds=3.0),
+        # Única tool que escribe: una vez por turno y nunca reintentada por la política;
+        # el reintento seguro lo hace el paciente con el mismo token/turnId.
+        ToolSpec("confirm_capture", max_calls_per_turn=1, deadline_seconds=3.0, idempotent=False),
     )
 }
 

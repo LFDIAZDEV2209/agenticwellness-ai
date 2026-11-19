@@ -441,18 +441,20 @@ async def test_saludo_no_precarga_lecturas_de_ficha(channel, backend, monkeypatc
     assert [r.url.path.rsplit("/", 1)[-1] for r in requests] == ["agents"]
 
 
-async def test_whatsapp_bloquea_la_lectura_y_la_traza_no_copia_datos(backend, caplog):
+async def test_whatsapp_lee_la_ficha_con_la_identidad_del_turno_y_sin_copiar_datos(backend, caplog):
     serve, http_requests = backend
 
     async def reply(_):
         return httpx.Response(200, json=PROFILE)
 
     serve(reply)
-    rejected = await invoke("profile", config=graph_config("whatsapp"))
-    assert rejected["code"] == "tool_not_authorized" and http_requests == []
-    trace = TurnTraceCollector(thread_id="fixture-thread", channel="text")
+    # KAN-74 8.1: misma lectura que la app; la identidad sale del turno, no del texto.
+    result = await invoke("profile", config=graph_config("whatsapp"))
+    assert result["status"] == "ok"
+    assert [r.url.params["userId"] for r in http_requests] == [OWNER]
+    trace = TurnTraceCollector(thread_id="fixture-thread", channel="whatsapp")
     caplog.set_level(logging.INFO)
-    await invoke("profile", config=attach_collector(graph_config(), trace))
+    await invoke("profile", config=attach_collector(graph_config("whatsapp"), trace))
     observed = json.dumps(trace.finish(status="completed").to_log())
     assert any(e.kind == "tool" and e.name == "get_my_profile" for e in trace.events)
     for sensitive in ("Paciente sintético", "Alérgeno sintético", KEY):

@@ -122,7 +122,10 @@ async def select_agent(
     previous: str | None = None,
     classifier: Classifier | None = None,
 ) -> RouteDecision:
-    allowed = [agent for agent in catalog if channel in agent.routing.channels]
+    # El catálogo del backend solo distingue texto y voz. WhatsApp es un canal
+    # textual: hereda la elegibilidad de texto para mantener paridad con la app.
+    eligibility = "text" if channel == "whatsapp" else channel
+    allowed = [agent for agent in catalog if eligibility in agent.routing.channels]
     if explicit and explicit != "base":
         matches = [a for a in allowed if explicit in {a.id, a.runtime_key, a.slug}]
         if not matches:
@@ -252,6 +255,37 @@ def patient_record_query(text: str) -> bool:
             text,
         )
     )
+
+
+def capture_query(text: str) -> bool:
+    """El paciente reporta un dato para registrarlo (medición, toma, comida o ánimo).
+
+    Solo enruta al planificador con tools de propuesta; ningún registro ocurre sin la
+    confirmación explícita del turno siguiente.
+    """
+    text = _positive_text(text)
+    domain = (
+        r"\b(peso|pese|weight|weigh|presion|tension|blood pressure|pulso|frecuencia cardiaca|"
+        r"heart rate|saturacion|oxigeno|oxygen|temperatura|temperature|fiebre|fever|"
+        r"medicamentos?|medicinas?|pastillas?|dosis|toma|pill|pills|meds|medications?|doses?|"
+        r"desayuno|almuerzo|merienda|cena|comida|breakfast|lunch|snack|dinner|meal|"
+        r"animo|estado de animo|mood|check.?in)\b"
+    )
+    if not re.search(domain, text):
+        return False
+    record_verb = re.search(
+        r"\b(registra|registrar|registrame|anota|anotar|apunta|apuntar|guarda|guardar|"
+        r"agrega|agregar|anade|marca|marcar|record|log|save|add|track|mark)\b",
+        text,
+    )
+    # «Ya me tomé la pastilla», «hoy pesé 80 kg», «mi presión es 120/80», «I took my meds».
+    report = re.search(
+        r"\b(ya (?:me )?tome|me tome|tome|olvide|se me olvido|desayune|almorce|cene|comi|"
+        r"took|skipped|missed|forgot|had|ate)\b",
+        text,
+    ) or re.search(r"\d+(?:[.,]\d+)?\s*(?:/\s*\d+|kg|kilos?|bpm|lpm|%|°|grados|c\b)", text)
+    question = re.search(r"^(?:que|cual|cuanto|cuando|como|what|which|how|when)\b", text)
+    return bool(record_verb or (report and not question))
 
 
 def capability_scope(text: str, *, unambiguous: bool = False) -> str | None:

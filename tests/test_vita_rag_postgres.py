@@ -324,13 +324,16 @@ async def test_runtime_privado_responde_con_fuentes_sin_inyectar_programa(
     assert A_TITLE in str(model.prompts) and B_TITLE not in str(model.prompts)
 
 
-async def test_paciente_sin_canal_autorizado_no_consulta_indice(rag, monkeypatch):
+async def test_paciente_sin_identidad_autenticada_no_consulta_indice(rag, monkeypatch):
     def forbidden():
         pytest.fail("No debe crear embeddings antes de verificar el alcance")
 
     monkeypatch.setattr("app.rag.retriever.get_embeddings", forbidden)
     tool = make_retrieve_tool([GLOBAL], allow_patient=True)
-    for config in (cfg(), cfg(PATIENT_A, channel="whatsapp")):
+    # WhatsApp tiene paridad (KAN-74 8.1), pero sin usuario vinculado no hay alcance.
+    anonymous = cfg(PATIENT_A, channel="whatsapp")
+    anonymous["configurable"].pop("user_id")
+    for config in (cfg(), anonymous):
         result = await tool.ainvoke({"scope": "patient", "query": "privado"}, config=config)
         assert "unavailable" in result and not references(result)
     with pytest.raises(ValueError):

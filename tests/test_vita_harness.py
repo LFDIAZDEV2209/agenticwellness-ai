@@ -62,12 +62,16 @@ def test_toda_tool_registrada_tiene_politica_explicita():
     assert not missing, f"Tools registradas sin ToolSpec en app/tools/policy.py: {missing}"
 
 
-def test_tools_de_ficha_solo_se_exponen_en_chat_y_voz():
+def test_tools_de_ficha_tienen_paridad_en_chat_voz_y_whatsapp():
+    # KAN-74 8.1: misma matriz de lecturas en los tres canales.
     assert VITA_RECORD_TOOL_NAMES.issubset(TOOLS_BY_NAME)
     for name in VITA_RECORD_TOOL_NAMES:
-        assert spec_for(name).allows("text")
-        assert spec_for(name).allows("voice")
-        assert not spec_for(name).allows("whatsapp")
+        for channel in ("text", "voice", "whatsapp"):
+            assert spec_for(name).allows(channel)
+    # El perfil legado y el flujo de controles siguen fuera de WhatsApp; las citas, fuera de todos.
+    assert not spec_for("get_patient_data").allows("whatsapp")
+    assert not spec_for("mark_control_declined").allows("whatsapp")
+    assert not any(spec_for("suggest_appointment").allows(c) for c in ("text", "voice", "whatsapp"))
 
 
 def test_politica_por_canal():

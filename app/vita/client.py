@@ -2,7 +2,8 @@
 
 import asyncio
 import json
-from typing import Any
+import re
+from typing import Any, Literal
 from uuid import UUID
 
 import httpx
@@ -270,3 +271,56 @@ async def read_document(user_id: str | None, document_id: UUID) -> RecordReadRes
         status="ok",
         data=DocumentContent(document=ticket.document, text=text, truncated=truncated),
     )
+
+
+# ── Captura confirmada (KAN-70) ────────────────────────────────────────────────
+
+_CAPTURE_CODE = re.compile(r"VITA_CAPTURE_[A-Z_]+|VITA_PATIENT_UNAVAILABLE|CONSENT_REQUIRED")
+
+
+async def _post(path: str, user_id: str, body: dict[str, Any], timeout: float) -> tuple[int, Any]:
+    settings = get_settings()
+    if not user_id or not settings.backend_base_url or not settings.internal_api_key:
+        raise VitaAccessError("vita_unavailable")
+    async with (
+        asyncio.timeout(timeout),
+        httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client,
+    ):
+        response = await client.post(
+            f"{settings.backend_base_url.rstrip('/')}/api/v1/internal/vita/{path}",
+            params={"userId": user_id},
+            json=body,
+            headers={"X-Internal-Key": settings.internal_api_key},
+        )
+        if len(response.content) > MAX_RESPONSE_BYTES:
+            raise VitaAccessError("vita_response_limit")
+        return response.status_code, response.json() if response.content else None
+
+
+def capture_failure_code(status: int, body: object) -> str:
+    """Código estable de BACK (sin payload clínico) o uno genérico por estado HTTP."""
+    match = _CAPTURE_CODE.search(json.dumps(body)) if body is not None else None
+    if match:
+        return match.group(0).lower()
+    return {
+        400: "vita_capture_invalid",
+        403: "vita_capture_forbidden",
+        404: "vita_capture_unavailable",
+        409: "vita_capture_conflict",
+        422: "vita_capture_rejected",
+    }.get(status, "vita_capture_unavailable")
+
+
+async def post_capture(
+    action: Literal["propose", "confirm"], user_id: str, body: dict[str, Any], timeout: float
+) -> tuple[bool, Any]:
+    """(ok, cuerpo | código). Nunca registra el cuerpo: contiene datos clínicos del paciente."""
+    try:
+        status, response = await _post(f"capture/{action}", user_id, body, timeout)
+    except (httpx.TimeoutException, TimeoutError):
+        return False, "tool_timeout"
+    except (httpx.HTTPError, ValueError, VitaAccessError):
+        return False, "vita_capture_unavailable"
+    if status == 200 and isinstance(response, dict):
+        return True, response
+    return False, capture_failure_code(status, response)

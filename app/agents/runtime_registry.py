@@ -29,6 +29,7 @@ from app.llm.factory import get_chat_model
 from app.memory.checkpointer import get_checkpointer
 from app.tools.registry import TOOLS_BY_NAME, legacy_tools, patient_tools
 from app.tools.retrieval import make_retrieve_tool
+from app.vita.capture import VITA_CAPTURE_TOOL_NAMES
 
 logger = logging.getLogger(__name__)
 
@@ -197,6 +198,7 @@ class AgentRuntimeRegistry:
         final_after_tools: bool = False,
         allow_patient_rag: bool = False,
         patient_retrieval: bool = False,
+        allow_capture: bool = False,
     ) -> CompiledAgent:
         """Construye el grafo con los overrides del agente (provider/model/tools)."""
         try:
@@ -214,7 +216,7 @@ class AgentRuntimeRegistry:
                 f"Configuración LLM inválida para agente {agent_type_id}: {exc}"
             ) from exc
 
-        tools = self._select_tools(runtime_config.tools, agent_type_id)
+        tools = self._select_tools(runtime_config.tools, agent_type_id, allow_capture=allow_capture)
 
         # RAG: si el agente tiene retrieval habilitado Y IDs resueltos, se le
         # inyecta la tool de recuperación limitada a sus KBs (aislamiento entre
@@ -256,13 +258,21 @@ class AgentRuntimeRegistry:
             runtime_config=runtime_config,
         )
 
-    def _select_tools(self, names: list[str], agent_type_id: str) -> list[Any]:
-        """Vacío hereda solo capacidades legadas; valida nombres explícitos."""
+    def _select_tools(
+        self, names: list[str], agent_type_id: str, *, allow_capture: bool = False
+    ) -> list[Any]:
+        """Vacío hereda solo capacidades legadas; valida nombres explícitos.
+
+        Las tools de captura (escritura clínica) solo las concede el overlay Vita tras
+        autorizar el turno; una config ERP que las liste no las activa por sí sola.
+        """
         if not names:
             return legacy_tools(include_patient=True)
 
         selected = []
         for name in names:
+            if name in VITA_CAPTURE_TOOL_NAMES and not allow_capture:
+                continue
             tool = TOOLS_BY_NAME.get(name)
             if tool is None:
                 raise AgentRuntimeError(
@@ -284,6 +294,7 @@ class AgentRuntimeRegistry:
         global_knowledge_base_ids: list[str] | None = None,
         allow_patient_rag: bool = False,
         patient_retrieval: bool = False,
+        allow_capture: bool = False,
     ) -> CompiledAgent:
         """Overlay explícito SOLO tras autorización Vita; no cambia la config ERP.
 
@@ -299,7 +310,8 @@ class AgentRuntimeRegistry:
             config.retrieval_config.enabled = True
             config.retrieval_config.knowledge_base_ids = list(global_knowledge_base_ids)
         names = {t.name for t in self._select_tools(config.tools, compiled.agent_type_id)}
-        config.tools = sorted((names - {"get_patient_data"}) | VITA_READ_TOOL_NAMES)
+        granted = VITA_READ_TOOL_NAMES | (VITA_CAPTURE_TOOL_NAMES if allow_capture else set())
+        config.tools = sorted((names - {"get_patient_data"} - VITA_CAPTURE_TOOL_NAMES) | granted)
         prepare = None
         if patient_retrieval:
             prepare = ["retrieve_knowledge"]
@@ -319,6 +331,7 @@ class AgentRuntimeRegistry:
             final_after_tools=plan_record and channel == "voice",
             allow_patient_rag=allow_patient_rag,
             patient_retrieval=patient_retrieval,
+            allow_capture=allow_capture,
         )
 
 

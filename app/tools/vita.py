@@ -4,6 +4,7 @@ from langchain_core.tools import StructuredTool
 from langgraph.config import get_config
 from pydantic import ValidationError
 
+from app.tools.vita_capture import VITA_CAPTURE_TOOLS
 from app.vita.client import INVALID_DOCUMENT_ARGUMENTS, read_context, read_document, read_record
 from app.vita.contracts import (
     INVALID_NUTRITION_DATE,
@@ -186,3 +187,10 @@ VITA_TOOL_ARGUMENTS = {
     tool.name: frozenset(tool.args_schema["properties"])
     for tool in (get_my_vitals, get_my_nutrition_plan, list_my_documents, read_my_document)
 }
+# Captura: solo los campos públicos del esquema (el estado inyectado no es argumento).
+VITA_TOOL_ARGUMENTS.update(
+    {
+        tool.name: frozenset(tool.tool_call_schema.model_json_schema()["properties"])
+        for tool in VITA_CAPTURE_TOOLS
+    }
+)

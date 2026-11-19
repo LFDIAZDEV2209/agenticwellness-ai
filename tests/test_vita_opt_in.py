@@ -55,11 +55,29 @@ async def test_enabled_old_or_erp_request_preserves_legacy_runtime(monkeypatch, 
     catalog.assert_not_awaited()
 
 
-async def test_whatsapp_stays_legacy_even_if_client_sets_capability(monkeypatch):
-    monkeypatch.setattr(get_settings(), "vita_runtime_enabled", True)
-    request = ChatRequest(message="Hola", agent="whatsapp", supports_vita=True)
-    assert not chat._is_vita_request(request)
+async def test_whatsapp_uses_vita_runtime_only_with_channel_flag(monkeypatch):
+    settings = get_settings()
+    monkeypatch.setattr(settings, "vita_runtime_enabled", True)
+    request = ChatRequest(message="Hola", agent="whatsapp", supports_vita=True, user_id="u-1")
+    assert request.channel == "whatsapp"
+    assert chat._is_vita_request(request) and chat._history_opt_in(request)
+    monkeypatch.setattr(settings, "vita_whatsapp_enabled", False)
+    assert not chat._is_vita_request(request) and not chat._history_opt_in(request)
     assert (await chat._resolve_graph(request, object()))[0] is None
+    # Sin la capacidad declarada por BACK, WhatsApp mantiene el perfil legado.
+    monkeypatch.setattr(settings, "vita_whatsapp_enabled", True)
+    assert not chat._is_vita_request(ChatRequest(message="Hola", agent="whatsapp", user_id="u-1"))
+    # Vínculo sin cuenta de la app: perfil legado, nunca 403 al paciente.
+    unlinked = ChatRequest(message="Hola", agent="whatsapp", supports_vita=True)
+    assert not chat._is_vita_request(unlinked) and not chat._history_opt_in(unlinked)
+
+
+def test_whatsapp_profile_fixes_channel_even_if_body_says_text():
+    request = ChatRequest(message="Hola", agent="whatsapp", channel="text")
+    assert request.channel == "whatsapp"
+    assert ChatRequest(message="Hola").channel == "text"
+    with pytest.raises(ValueError):
+        ChatRequest(message="Hola", channel="voice")
 
 
 @pytest.mark.parametrize("authorized", [False, True])

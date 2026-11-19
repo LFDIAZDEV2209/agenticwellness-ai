@@ -82,6 +82,13 @@ class Settings(BaseSettings):
     # URL del backend para consultas internas del contexto del paciente.
     backend_base_url: str = ""
     vita_runtime_enabled: bool = False
+    # Kill switch por canal (KAN-74 8.1): WhatsApp usa el runtime Vita (lecturas,
+    # RAG y routing) cuando el runtime global también está activo.
+    vita_whatsapp_enabled: bool = True
+    # Tools de captura confirmada (KAN-70). BACK conserva su propio flag
+    # (`Vita:CaptureEnabled`): apagado allí, la propuesta responde 404 y la tool
+    # informa que no está disponible sin escribir nada.
+    vita_capture_enabled: bool = True
     vita_http_timeout: float = Field(default=3, gt=0, le=8)
     vita_document_storage_origin: str = (
         "https://cooppadresd-storage-prod.s3.us-east-2.amazonaws.com"

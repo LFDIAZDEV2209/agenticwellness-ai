@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 
 
 class ControlContext(BaseModel):
@@ -73,6 +73,34 @@ class ChatRequest(BaseModel):
             "al mismo user_id/patient_id y no haber expirado."
         ),
     )
+    # Canal de mensajería del turno (KAN-74 8.1). Lo fija el backend: `voice`
+    # NO se admite aquí porque la voz entra por su ruta con sesión verificada.
+    channel: Literal["text", "whatsapp"] | None = Field(
+        default=None,
+        description=(
+            "Canal del turno ('text' | 'whatsapp'). Ausente ⇒ se deriva del perfil "
+            "(`agent=whatsapp` ⇒ whatsapp; resto ⇒ text)."
+        ),
+    )
+    channel_message_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=512,
+        description="ID del mensaje en el proveedor del canal (p. ej. `wamid`). Sin contenido.",
+    )
+
+    @model_validator(mode="after")
+    def _resolve_channel(self) -> "ChatRequest":
+        """Fija el canal efectivo una sola vez, antes de que el routing cambie `agent`.
+
+        El perfil `whatsapp` siempre implica canal WhatsApp: un `channel=text`
+        contradictorio no puede degradar las reglas de ese canal.
+        """
+        if self.agent == "whatsapp":
+            self.channel = "whatsapp"
+        elif self.channel is None:
+            self.channel = "text"
+        return self
 
 
 class ChatAttachmentResult(BaseModel):
