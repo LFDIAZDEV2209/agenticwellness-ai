@@ -24,6 +24,7 @@ from app.agents.prompts import (
     TEXT_DELIVERY_POLICY,
     VITA_CAPTURE_POLICY,
     VOICE_DELIVERY_POLICY,
+    WHATSAPP_DATA_POLICY,
     WHATSAPP_FORMAT_POLICY,
     WHATSAPP_SCOPE_POLICY,
     build_control_guidance,
@@ -460,6 +461,8 @@ def make_agent_node(
         if channel == "whatsapp" and not (profile is not None and profile.key == "whatsapp"):
             # El perfil legado ya lo trae en su prompt; los agentes Vita no.
             system_blocks.append(WHATSAPP_FORMAT_POLICY)
+        if channel == "whatsapp":
+            system_blocks.append(WHATSAPP_DATA_POLICY)
         if not final_response and any(t.name in VITA_CAPTURE_TOOL_NAMES for t in active_tools):
             system_blocks.append(VITA_CAPTURE_POLICY)
 
