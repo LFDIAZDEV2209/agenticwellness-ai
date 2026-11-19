@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.knowledge_scope import resolve_knowledge_base_ids
 from app.agents.runtime_config import AgentRuntimeConfig
+from app.core.config import get_settings
 from app.db.models import AgentRuntimeConfig as AgentRuntimeConfigRow
 from app.graph.graph import build_graph
 from app.llm.factory import get_chat_model
@@ -304,6 +305,13 @@ class AgentRuntimeRegistry:
         from app.tools.vita import VITA_READ_TOOL_NAMES
 
         config = compiled.runtime_config.model_copy(deep=True)
+        # La voz prioriza latencia: usa el modelo rápido y omite temperature
+        # (los modelos con thinking de Anthropic la rechazan).
+        if channel == "voice":
+            voice_model = get_settings().vita_voice_model
+            if voice_model:
+                config.model = voice_model
+                config.temperature = None
         # Publicar una KB Global concede referencia común a Vita. Deshabilitar
         # RAG propio no concede sus documentos: el overlay solo añade Global.
         if not config.retrieval_config.enabled and global_knowledge_base_ids:

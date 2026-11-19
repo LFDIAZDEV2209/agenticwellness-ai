@@ -40,12 +40,6 @@ SECRET, SERVICE_KEY = "context-fixture-" * 3, "service-fixture-" * 3
 SESSION_ID = "11111111-1111-1111-1111-111111111111"
 
 
-def test_voice_fillers_are_bilingual_and_short():
-    assert "Claro, un momento" in vita_voice._VOICE_FILLERS["es"]
-    assert "One moment" in vita_voice._VOICE_FILLERS["en"]
-    assert 0 < vita_voice._VOICE_FILLER_DELAY_SECONDS <= 2
-
-
 class SimulatedStore:
     """Solo doble contractual, sin pretensión de representar locks entre réplicas."""
 
@@ -118,8 +112,14 @@ class SimulatedStore:
                     )
                     existing.status = "control" if phase == "control" else "running"
                     action = "control" if phase == "control" else "run"
-                elif latest.ordinal != ordinal or existing.status in {"interrupted", "superseded"}:
+                elif latest.ordinal != ordinal or existing.status == "superseded":
                     action = "obsolete"
+                elif existing.status == "interrupted":
+                    existing.status = "running"
+                    existing.response_message_id = (
+                        f"voice:{binding.session_id}:{ordinal}:bot:{uuid.uuid4().hex}"
+                    )
+                    action = "run"
                 elif existing.status == "completed":
                     action = "replay"
                 elif existing.status == "running":
@@ -821,6 +821,7 @@ async def test_inflight_http_duplicate_waits_and_replays_without_another_llm(rig
 @pytest.mark.parametrize("stage", ["prepare", "resolve"])
 async def test_cancellation_before_generation_marks_only_admitted_run_interrupted(rig, stage):
     entered = asyncio.Event()
+    original_resolve = rig.resolver.side_effect
 
     async def hold(*args, **kwargs):
         entered.set()
@@ -838,14 +839,18 @@ async def test_cancellation_before_generation_marks_only_admitted_run_interrupte
             await pending
         assert rig.store.receipts[1].status == "interrupted"
         assert rig.model.prompts == []
-        # Reintentar el mismo cuerpo no roba el claim ni inicia otro modelo.
-        # El adaptador responde una frase breve para que ElevenLabs no
-        # interprete el SSE vacío como fallo de generación (1002).
+        # Un reintento de la misma locución tras cancelar se admite como run
+        # nuevo (epoch nuevo); no se devuelve un SSE vacío ni se pierde la
+        # pregunta del paciente.
+        if stage == "prepare":
+            rig.history.ensure_locked.side_effect = None
+        else:
+            rig.resolver.side_effect = original_resolve
+        rig.model.responses = [AIMessage(content="Respuesta recuperada")]
         repeated = await post(rig)
-        assert repeated.status_code == 200
-        assert "No pude completar la respuesta anterior" in repeated.text
-        assert len(rig.model.prompts) == 0
-        assert rig.store.receipts[1].status == "interrupted"
+        assert repeated.status_code == 200 and "Respuesta recuperada" in repeated.text
+        assert len(rig.model.prompts) == 1
+        assert rig.store.receipts[1].status == "completed"
     finally:
         pending.cancel()
         await asyncio.gather(pending, return_exceptions=True)

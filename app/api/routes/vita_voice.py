@@ -131,19 +131,6 @@ def require_voice_service(authorization: str | None = Header(default=None)) -> N
         raise HTTPException(status_code=401, detail="voice_service_auth_required")
 
 
-_OBSOLETE_MESSAGES = {
-    "es": "No pude completar la respuesta anterior. ¿Me lo repites, por favor?",
-    "en": "I couldn't finish the previous answer. Could you repeat it, please?",
-}
-# Muletillas de progreso para voz: se emiten si el primer token tarda más de
-# este umbral (tools/RAG/LLM). Evitan el silencio sin bloquear la respuesta.
-_VOICE_FILLERS = {
-    "es": "Claro, un momento. ",
-    "en": "One moment, let me check. ",
-}
-_VOICE_FILLER_DELAY_SECONDS = 1.2
-
-
 def _chunk(response_id: str, content: str | None = None, *, done=False) -> str:
     payload = {
         "id": response_id,
@@ -214,18 +201,8 @@ async def completion(
 
     def obsolete_response():
         async def finish():
-            # Un reintento del proveedor sobre un turno cancelado no puede
-            # devolver un SSE vacío: ElevenLabs lo interpreta como generación
-            # fallida (1002) y corta la llamada. Se responde una frase breve
-            # para conservar la sesión; el turno no se reclama ni se duplica.
-            if (
-                not switch
-                and admission.latest_ordinal_matches
-                and admission.counter_reused
-                and not admission.existing_completed
-            ):
-                language = record.language if record.language in _OBSOLETE_MESSAGES else "es"
-                yield _chunk(admission.response_message_id, _OBSOLETE_MESSAGES[language])
+            # Turno antiguo/supersedido: se cierra sin contenido. Los turnos
+            # interrumpidos se reintentan como run, no llegan aquí.
             yield _chunk(admission.response_message_id, done=True)
             yield "data: [DONE]\n\n"
 
@@ -393,7 +370,6 @@ async def completion(
         started = request_started
         first_token_ms = None
         text_chars = 0
-        filler_sent = False
         state, completed = None, False
         next_access_check = time.monotonic() + 1
         failure: str | None = None
@@ -418,16 +394,6 @@ async def completion(
                         if time.monotonic() >= next_access_check:
                             await read_catalog(record.user_id)
                             next_access_check = time.monotonic() + 1
-                        if (
-                            not filler_sent
-                            and first_token_ms is None
-                            and time.perf_counter() - started >= _VOICE_FILLER_DELAY_SECONDS
-                        ):
-                            filler_sent = True
-                            first_token_ms = int((time.perf_counter() - started) * 1000)
-                            filler = _VOICE_FILLERS.get(request.language, _VOICE_FILLERS["es"])
-                            text_chars += len(filler)
-                            yield _chunk(admission.response_message_id, filler)
                     try:
                         mode, chunk = pending.result()
                     except StopAsyncIteration:

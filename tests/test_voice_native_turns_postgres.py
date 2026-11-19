@@ -315,8 +315,8 @@ async def test_latest_utterance_can_be_amended_with_revision_response_id(
         assert await store.voice_store.finish_admission(old, initial_state)
     duplicate = await admit(owner, "provisional fixture", phase=initial_phase)
     if initial_state == "interrupted":
-        assert duplicate.action == "obsolete"
-        assert duplicate.response_message_id == old.response_message_id
+        assert duplicate.action == "run"
+        assert duplicate.response_message_id != old.response_message_id
     if initial_state == "completed":
         assert duplicate.action == "replay"
         assert duplicate.response_message_id == old.response_message_id
@@ -495,11 +495,13 @@ async def test_wait_does_not_hold_transaction_revocation_and_timeout_never_regen
         await store.voice_store.check_current(runner)
 
 
-async def test_interrupted_receipt_is_never_reclaimed_for_same_utterance(rig):
+async def test_interrupted_receipt_can_be_retried_for_same_utterance(rig):
     owner = await binding(rig)
     first = await admit(owner, "fixture one")
     await store.voice_store.finish_admission(first, "interrupted")
-    assert (await admit(owner, "fixture one")).action == "obsolete"
+    retry = await admit(owner, "fixture one")
+    assert retry.action == "run"
+    assert retry.response_message_id != first.response_message_id
     assert (await admit(owner, "fixture one", "fixture two")).action == "run"
 
 
@@ -692,7 +694,9 @@ async def test_cancelled_runner_final_revision_runs_once_and_fences_old_checkpoi
             await running
         assert model.cancelled.is_set()
         assert await store.voice_store.finish_admission(original, "interrupted")
-        assert (await admit(owner, "provisional fixture", counter=99)).action == "obsolete"
+        retry = await admit(owner, "provisional fixture", counter=99)
+        assert retry.action == "run"
+        assert retry.response_message_id != original.response_message_id
         assert (await store.voice_store.wait_for_turn(old_waiter)).action == "obsolete"
 
         claims = await asyncio.gather(
