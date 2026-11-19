@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from dataclasses import asdict
 
 import pytest
@@ -407,6 +408,12 @@ async def test_traza_registra_nodo_tool_tokens_y_latencia_sin_contenido(caplog):
 
     serialized = json.dumps(asdict(trace), default=str) + json.dumps(trace.to_log())
     logs = "\n".join(r.getMessage() for r in caplog.records if r.name.startswith("app."))
+    # Los timestamps contienen dígitos al azar (p. ej. «…416187»), que pueden
+    # coincidir con un valor clínico sin que haya fuga. La comprobación anti-PHI
+    # solo debe mirar contenido y metadatos estables.
+    timestamp = r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?"
+    serialized = re.sub(timestamp, "", serialized)
+    logs = re.sub(timestamp, "", logs)
     for leaked in ("glucosa", "187", "metformina", "SECRETO", "sk-ant"):
         assert leaked not in serialized, f"La traza contiene '{leaked}'"
         assert leaked not in logs, f"Los logs contienen '{leaked}'"
