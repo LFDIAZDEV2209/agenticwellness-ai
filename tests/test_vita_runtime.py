@@ -14,6 +14,7 @@ from app.agents.prompts import (
     VOICE_DELIVERY_POLICY,
 )
 from app.agents.runtime_registry import AgentRuntimeRegistry
+from app.core.config import get_settings
 from app.graph.graph import build_graph
 from app.vita import runtime
 from app.vita.contracts import ContextEnvelope
@@ -171,7 +172,13 @@ async def test_base_and_specialist_can_read_facts_without_erp_tool_config(
         assert result["tools_used"] == ["get_my_nutrition"]
     if explicit:
         assert turn.agent_id == AGENT_ID and turn.version_id == VERSION_ID
-        assert all(o["model"] == "specialist-effective" for o in model_options)
+        if channel == "voice":
+            # El primer modelo es el agente compilado; el overlay de voz
+            # recompila con el modelo rápido.
+            assert model_options[-1]["model"] == get_settings().vita_voice_model
+            assert all(o["model"] == "specialist-effective" for o in model_options[:-1])
+        else:
+            assert all(o["model"] == "specialist-effective" for o in model_options)
         assert all(o["provider"] == "openai" for o in model_options)
     assert len(model.prompts) == (2 if multiple else 1)
     assert "vigente" in str(model.prompts[-1])
