@@ -124,7 +124,8 @@ def _make_record_tool(
 get_my_profile = _make_record_tool(
     "profile",
     "Lee mi perfil activo, edad, metas registradas, alergias, restricciones y el historial "
-    "de peso, talla e IMC / Read my profile, goals, allergies, restrictions and anthropometry.",
+    "de peso, talla e IMC / Read my profile, goals, allergies, restrictions and anthropometry. "
+    "Usa esta herramienta para preguntas de peso, talla o IMC: incluye la última medición.",
 )
 get_my_vitals = _make_record_tool(
     "vitals",
@@ -132,7 +133,9 @@ get_my_vitals = _make_record_tool(
         "Lee mis últimos signos vitales y su historial con unidad, fecha y origen / Read my "
         "recorded vital signs and biometrics. Intervalo local inclusivo de hasta 31 días; "
         "por defecto el backend devuelve los últimos siete días. Si la fecha solicitada es "
-        "relativa y no conoces el día local, usa el rango por defecto y las fechas de la respuesta."
+        "relativa y no conoces el día local, usa el rango por defecto y las fechas de la "
+        "respuesta. "
+        "Para peso, talla o IMC usa get_my_profile, no esta herramienta."
     ),
     schema=VitalsArguments,
     invalid=INVALID_VITALS_RANGE,

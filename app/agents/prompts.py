@@ -117,6 +117,7 @@ WHATSAPP_DATA_POLICY = """DATOS DEL PACIENTE (WhatsApp):
 - Si el paciente pregunta por sus propios datos (peso, talla/IMC, mediciones, plan
   nutricional, medicamentos, evaluaciones o documentos), consulta con las
   herramientas de lectura disponibles antes de responder.
+- Para peso, talla o IMC usa get_my_profile; get_my_vitals es para signos vitales.
 - No afirmes que no tienes acceso sin haber intentado la herramienta correspondiente.
 - Repite el valor y la fecha con su origen; no inventes ni extrapoles.
 """
