@@ -131,6 +131,12 @@ def require_voice_service(authorization: str | None = Header(default=None)) -> N
         raise HTTPException(status_code=401, detail="voice_service_auth_required")
 
 
+_OBSOLETE_MESSAGES = {
+    "es": "No pude completar la respuesta anterior. ¿Me lo repites, por favor?",
+    "en": "I couldn't finish the previous answer. Could you repeat it, please?",
+}
+
+
 def _chunk(response_id: str, content: str | None = None, *, done=False) -> str:
     payload = {
         "id": response_id,
@@ -201,6 +207,18 @@ async def completion(
 
     def obsolete_response():
         async def finish():
+            # Un reintento del proveedor sobre un turno cancelado no puede
+            # devolver un SSE vacío: ElevenLabs lo interpreta como generación
+            # fallida (1002) y corta la llamada. Se responde una frase breve
+            # para conservar la sesión; el turno no se reclama ni se duplica.
+            if (
+                not switch
+                and admission.latest_ordinal_matches
+                and admission.counter_reused
+                and not admission.existing_completed
+            ):
+                language = record.language if record.language in _OBSOLETE_MESSAGES else "es"
+                yield _chunk(admission.response_message_id, _OBSOLETE_MESSAGES[language])
             yield _chunk(admission.response_message_id, done=True)
             yield "data: [DONE]\n\n"
 

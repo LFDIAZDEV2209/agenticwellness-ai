@@ -112,14 +112,8 @@ class SimulatedStore:
                     )
                     existing.status = "control" if phase == "control" else "running"
                     action = "control" if phase == "control" else "run"
-                elif latest.ordinal != ordinal or existing.status == "superseded":
+                elif latest.ordinal != ordinal or existing.status in {"interrupted", "superseded"}:
                     action = "obsolete"
-                elif existing.status == "interrupted":
-                    existing.status = "running"
-                    existing.response_message_id = (
-                        f"voice:{binding.session_id}:{ordinal}:bot:{uuid.uuid4().hex}"
-                    )
-                    action = "run"
                 elif existing.status == "completed":
                     action = "replay"
                 elif existing.status == "running":
@@ -821,7 +815,6 @@ async def test_inflight_http_duplicate_waits_and_replays_without_another_llm(rig
 @pytest.mark.parametrize("stage", ["prepare", "resolve"])
 async def test_cancellation_before_generation_marks_only_admitted_run_interrupted(rig, stage):
     entered = asyncio.Event()
-    original_resolve = rig.resolver.side_effect
 
     async def hold(*args, **kwargs):
         entered.set()
@@ -839,18 +832,14 @@ async def test_cancellation_before_generation_marks_only_admitted_run_interrupte
             await pending
         assert rig.store.receipts[1].status == "interrupted"
         assert rig.model.prompts == []
-        # Reintentar el mismo cuerpo tras cancelar antes de generar inicia un
-        # run nuevo con epoch nuevo; no devuelve un SSE vacío que el proveedor
-        # interpretaría como fallo duro.
-        if stage == "prepare":
-            rig.history.ensure_locked.side_effect = None
-        else:
-            rig.resolver.side_effect = original_resolve
-        rig.model.responses = [AIMessage(content="Respuesta recuperada")]
+        # Reintentar el mismo cuerpo no roba el claim ni inicia otro modelo.
+        # El adaptador responde una frase breve para que ElevenLabs no
+        # interprete el SSE vacío como fallo de generación (1002).
         repeated = await post(rig)
-        assert repeated.status_code == 200 and "Respuesta recuperada" in repeated.text
-        assert len(rig.model.prompts) == 1
-        assert rig.store.receipts[1].status == "completed"
+        assert repeated.status_code == 200
+        assert "No pude completar la respuesta anterior" in repeated.text
+        assert len(rig.model.prompts) == 0
+        assert rig.store.receipts[1].status == "interrupted"
     finally:
         pending.cancel()
         await asyncio.gather(pending, return_exceptions=True)

@@ -207,18 +207,8 @@ class VoiceStore:
                         f"voice:{binding.session_id}:{ordinal}:bot:{uuid4().hex}"
                     )
                     action = "control" if phase == "control" else "run"
-                elif latest.ordinal != ordinal or existing.status == "superseded":
+                elif latest.ordinal != ordinal or existing.status in {"superseded", "interrupted"}:
                     action = "obsolete"
-                elif existing.status == "interrupted":
-                    # Un turno cancelado (p. ej. el cliente reenvió la misma
-                    # locución tras un corte) puede reintentarse con el mismo
-                    # prefijo. El epoch nuevo invalida cualquier escritura
-                    # tardía del runner anterior sin duplicar la respuesta.
-                    existing.status = "running"
-                    existing.response_message_id = (
-                        f"voice:{binding.session_id}:{ordinal}:bot:{uuid4().hex}"
-                    )
-                    action = "run"
                 elif existing.status == "completed":
                     action = "replay"
                 elif existing.status == "running":
