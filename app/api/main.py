@@ -21,6 +21,7 @@ from app.api.routes import (
     proactive,
     program_narrative,
     threads,
+    vita_attachments,
     vita_documents,
     vita_voice,
     voice,
@@ -58,8 +59,13 @@ async def lifespan(_app: FastAPI):
 
         await prewarm_embeddings()
     from app.history.service import retention_worker
+    from app.vita.attachments import attachment_purge_worker
 
-    async with retention_worker():
+    if settings.environment.lower() == "test" or not settings.database_url:
+        async with retention_worker():
+            yield
+        return
+    async with retention_worker(), attachment_purge_worker():
         yield
 
 
@@ -99,6 +105,7 @@ def create_app() -> FastAPI:
     app.include_router(lab_exam.router)
     app.include_router(voice.router)
     app.include_router(vita_documents.router)
+    app.include_router(vita_attachments.router)
     app.include_router(vita_voice.router)
     app.include_router(program_narrative.router)
     app.include_router(content_translation.router)

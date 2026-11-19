@@ -100,6 +100,20 @@ class Settings(BaseSettings):
     vita_voice_service_key: str = ""
     vita_voice_context_secret: str = ""
     vita_voice_session_ttl: int = Field(default=600, ge=30, le=600)
+    # Adjuntos efímeros del chat Vita (Ola B, 6.1-6.5). Apagado por defecto en
+    # todos los entornos: se activa explícitamente con VITA_ATTACHMENTS_ENABLED.
+    vita_attachments_enabled: bool = False
+    # Límites del proveedor de visión: Anthropic rechaza imágenes > 5 MiB.
+    vita_attachment_max_image_bytes: int = Field(default=5 * 1024 * 1024, ge=1024, le=20 * 2**20)
+    vita_attachment_max_pdf_bytes: int = Field(default=10 * 1024 * 1024, ge=1024, le=50 * 2**20)
+    vita_attachment_max_pdf_pages: int = Field(default=20, ge=1, le=200)
+    # TTL del binario efímero; tras expirar no se puede leer y la purga lo borra.
+    vita_attachment_ttl_seconds: int = Field(default=86_400, ge=300, le=7 * 86_400)
+    vita_attachment_purge_interval: int = Field(default=300, ge=10, le=3_600)
+    # Tope del texto extraído que entra al turno (se trunca con marca visible).
+    vita_attachment_max_text_chars: int = Field(default=24_000, ge=1_000, le=200_000)
+    vita_attachment_max_vision_images: int = Field(default=4, ge=1, le=10)
+    vita_attachment_extraction_timeout: float = Field(default=25, gt=0, le=60)
 
     # CORS — allowlist explícita de orígenes (separados por coma en CORS_ORIGINS).
     # No hay clientes de navegador del AI Service hoy: el backend .NET lo consume

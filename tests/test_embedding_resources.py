@@ -264,6 +264,7 @@ async def test_lifespan_prepares_before_serving_only_for_vita(
         vita_runtime_enabled=enabled,
         openai_api_key=key,
         auto_migrate=False,
+        database_url="",
     )
     monkeypatch.setattr(main, "get_settings", lambda: settings)
     monkeypatch.setattr(main, "setup_logging", lambda: None)

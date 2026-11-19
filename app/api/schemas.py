@@ -1,5 +1,6 @@
 from datetime import datetime
 from typing import Literal
+from uuid import UUID
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
@@ -63,6 +64,23 @@ class ChatRequest(BaseModel):
             "idioma del usuario (comportamiento byte-idéntico al estándar)."
         ),
     )
+    attachment_ids: list[UUID] = Field(
+        default_factory=list,
+        max_length=3,
+        description=(
+            "Adjuntos efímeros (POST /internal/vita/attachments) a usar en este turno. "
+            "Solo chat Vita de texto con flag VITA_ATTACHMENTS_ENABLED; deben pertenecer "
+            "al mismo user_id/patient_id y no haber expirado."
+        ),
+    )
+
+
+class ChatAttachmentResult(BaseModel):
+    """Resultado de lectura de un adjunto en el turno (sin contenido)."""
+
+    attachment_id: str
+    kind: Literal["image", "pdf"]
+    readable: bool
 
 
 class ChatSuggestion(BaseModel):
@@ -103,6 +121,10 @@ class ChatResponse(BaseModel):
             "Solo se emite cuando el paciente rechazó explícitamente subir su "
             "examen; ausente/null en cualquier otro caso."
         ),
+    )
+    attachments: list[ChatAttachmentResult] = Field(
+        default_factory=list,
+        description="Lectura de cada adjunto del turno; vacío si el turno no tenía adjuntos.",
     )
 
 

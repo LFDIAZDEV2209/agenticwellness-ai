@@ -12,12 +12,14 @@ from typing import Any
 from anyio import CancelScope
 from fastapi import APIRouter, Depends, HTTPException, Request
 from langchain_core.messages import AIMessage, AIMessageChunk
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.agents.runtime_registry import AgentRuntimeError
 from app.agents.runtime_registry import registry as runtime_registry
 from app.api.deps import get_db_session, get_graph
 from app.api.message_text import extract_message_text
 from app.api.schemas import (
+    ChatAttachmentResult,
     ChatRequest,
     ChatResponse,
     ChatSuggestion,
@@ -187,6 +189,49 @@ async def _prepare_chat_history(request: ChatRequest, thread_id: str, graph):
     except Exception as exc:
         raise HTTPException(status_code=503, detail="history_state_unavailable") from exc
     return config["configurable"]["vita_history"]
+
+
+async def _prepare_attachments(request: ChatRequest, thread_id: str, session):
+    """Valida acceso y extrae el texto de los adjuntos efímeros del turno.
+
+    El paciente sale del contexto autenticado que envía el backend, nunca del
+    modelo. Un adjunto ajeno, expirado o inexistente es indistinguible (404).
+    """
+    if not request.attachment_ids:
+        return None
+    if not get_settings().vita_attachments_enabled:
+        raise HTTPException(status_code=403, detail="vita_attachments_disabled")
+    from app.tools.retrieval import authorized_patient_id
+
+    patient_id = authorized_patient_id(
+        {"user_id": request.user_id, "patient_id": request.patient_id, "message_channel": "text"}
+    )
+    if not _history_opt_in(request) or patient_id is None:
+        raise HTTPException(status_code=403, detail="vita_identity_required")
+    from app.vita.attachment_context import build_turn_context, extract_attachment
+    from app.vita.attachments import AttachmentStore
+
+    ids = list(dict.fromkeys(request.attachment_ids))
+    try:
+        rows = await AttachmentStore(session).get_many(
+            ids, patient_id=uuid.UUID(patient_id), user_id=request.user_id
+        )
+    except SQLAlchemyError as exc:
+        logger.warning("vita_attachment_store_unavailable error=%s", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="attachment_store_unavailable") from None
+    if len(rows) != len(ids) or any(row.thread_id not in (None, thread_id) for row in rows):
+        raise HTTPException(status_code=404, detail="vita_attachment_not_found")
+    extracted = await asyncio.gather(*(extract_attachment(row) for row in rows))
+    return build_turn_context(extracted)
+
+
+def _attachment_results(context) -> list[ChatAttachmentResult]:
+    if context is None:
+        return []
+    return [
+        ChatAttachmentResult(attachment_id=s.attachment_id, kind=s.kind, readable=s.readable)
+        for s in context.summaries
+    ]
 
 
 def _with_transcript_lock(graph, *, force=False):
@@ -363,6 +408,7 @@ async def chat(
             request.agent_type_id or request.agent or "base",
         )
 
+    attachment_context = await _prepare_attachments(request, thread_id, session)
     history_binding = await _prepare_chat_history(request, thread_id, base_graph)
     graph, recursion_limit, version_id, provider, model = await _resolve_graph(
         request, session, base_graph, thread_id
@@ -387,6 +433,8 @@ async def chat(
     if history_binding is not None:
         config["configurable"]["vita_history"] = history_binding
     config["configurable"]["execution_id"] = execution_id
+    if attachment_context is not None:
+        config["configurable"]["vita_attachments"] = attachment_context
     collector = _turn_collector(request, thread_id, execution_id)
     attach_collector(config, collector)
     turn_status, turn_error, result = "failed", "exc_unknown", None
@@ -496,6 +544,7 @@ async def chat(
         execution_id=execution_id,
         suggestions=_normalize_suggestions(result.get("suggestions", [])),
         control_signal=control_signal,
+        attachments=_attachment_results(attachment_context),
     )
 
 
@@ -568,6 +617,7 @@ async def chat_stream(
             request.agent_type_id or request.agent or "base",
         )
 
+    attachment_context = await _prepare_attachments(request, thread_id, session)
     history_binding = await _prepare_chat_history(request, thread_id, base_graph)
     graph, recursion_limit, version_id, provider, model = await _resolve_graph(
         request, session, base_graph, thread_id
@@ -608,6 +658,8 @@ async def chat_stream(
             if history_binding is not None:
                 config["configurable"]["vita_history"] = history_binding
             config["configurable"]["execution_id"] = execution_id
+            if attachment_context is not None:
+                config["configurable"]["vita_attachments"] = attachment_context
             attach_collector(config, collector)
             agent_key = request.agent or request.agent_type_id or "base"
 
@@ -759,6 +811,10 @@ async def chat_stream(
                 )
             ],
         }
+        if attachment_context is not None:
+            done_payload["attachments"] = [
+                a.model_dump() for a in _attachment_results(attachment_context)
+            ]
         # Señal del control de programa (UC-001 'Controles'): evento propio
         # DESPUÉS del stream de tokens y ANTES de `done`, solo cuando el turno
         # traía contexto Y el modelo llamó la tool de rechazo explícito. El

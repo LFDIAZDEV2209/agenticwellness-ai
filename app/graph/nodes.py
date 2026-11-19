@@ -39,7 +39,12 @@ from app.tools.catalog import conversion_failures, tool_label
 from app.tools.policy import TOOL_SPECS, filter_for_channel, resolve_channel, spec_for
 from app.tools.registry import TOOLS_BY_NAME, legacy_tools, patient_tools
 from app.tools.vita import VITA_TOOL_ARGUMENTS
-from app.vita.context_builder import ContextBudget, build_context
+from app.vita.context_builder import (
+    MESSAGE_OVERHEAD_TOKENS,
+    ContextBudget,
+    build_context,
+    estimate_tokens,
+)
 from app.vita.routing import service_query
 
 logger = logging.getLogger(__name__)
@@ -99,6 +104,9 @@ def guardrails_node(state: AgentState) -> dict:
     if configurable.get("voice_session_id"):
         message_metadata["voice_session_id"] = configurable["voice_session_id"]
         message_metadata["source"] = "vita_runtime"
+    attachments = configurable.get("vita_attachments")
+    # Referencia mínima del adjunto en el hilo (id + tipo); jamás su contenido.
+    attachment_refs = [dict(ref) for ref in getattr(attachments, "refs", ())]
     # El checkpointer conserva el historial, pero estas salidas pertenecen a
     # UN turno. Overwrite evita que operator.add conserve acciones anteriores.
     turn_state = {
@@ -153,6 +161,7 @@ def guardrails_node(state: AgentState) -> dict:
                             if configurable.get("message_channel") == "voice"
                             else "final"
                         ),
+                        **({"attachments": attachment_refs} if attachment_refs else {}),
                     },
                 )
             ]
@@ -303,6 +312,28 @@ def _tool_catalog_failure(
     }
 
 
+def _budget_after_attachments(total: int, attachment_block: str) -> int:
+    """Reserva tokens para los datos adjuntos sin dejar sin espacio a políticas e historial."""
+    if not attachment_block:
+        return total
+    return max(total // 2, total - estimate_tokens(attachment_block) - MESSAGE_OVERHEAD_TOKENS)
+
+
+def _with_attachment_data(context, attachment_block: str) -> list[BaseMessage]:
+    """Coloca los datos adjuntos justo antes de la pregunta vigente del paciente.
+
+    Van como mensaje de usuario delimitado (no de sistema): no heredan autoridad
+    de instrucción. No se devuelven en el estado, así que nunca se persisten.
+    """
+    prompt = list(context.prompt)
+    data = HumanMessage(content=attachment_block)
+    offset = len(prompt) - len(context.history)
+    for index in range(len(context.history) - 1, -1, -1):
+        if isinstance(context.history[index], HumanMessage):
+            return [*prompt[: offset + index], data, *prompt[offset + index :]]
+    return [*prompt, data]
+
+
 def make_agent_node(
     model: BaseChatModel,
     system_prompt: str = BASE_SYSTEM_PROMPT,
@@ -420,6 +451,12 @@ def make_agent_node(
             if service_query(state.get("input", "")):
                 system_blocks.append(SERVICE_DELIVERY_POLICY)
 
+        # Adjuntos efímeros (Ola B): política de datos no confiables por turno.
+        attachments = configurable.get("vita_attachments")
+        attachment_block = getattr(attachments, "data_block", "") if attachments else ""
+        if attachment_block:
+            system_blocks.append(attachments.policy())
+
         if configurable.get("message_channel") == "voice":
             # La entrega oral cierra las políticas de sistema; los datos del
             # perfil/documentos no convierten un resumen en una lectura completa.
@@ -431,10 +468,17 @@ def make_agent_node(
             experience=state.get("experience_context") or "",
             policies=[SystemMessage(content=block) for block in system_blocks],
             history=history,
-            budget=ContextBudget(total=get_settings().vita_context_token_budget),
+            budget=ContextBudget(
+                total=_budget_after_attachments(
+                    get_settings().vita_context_token_budget, attachment_block
+                )
+            ),
         )
 
-        response = await active_model.ainvoke(context.prompt)
+        prompt = context.prompt
+        if attachment_block:
+            prompt = _with_attachment_data(context, attachment_block)
+        response = await active_model.ainvoke(prompt)
         if (final_response or state.get("tool_budget_exhausted")) and response.tool_calls:
             response = AIMessage(
                 content=(

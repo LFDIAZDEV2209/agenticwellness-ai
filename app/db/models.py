@@ -21,6 +21,7 @@ from sqlalchemy import (
     ForeignKeyConstraint,
     Index,
     Integer,
+    LargeBinary,
     Numeric,
     String,
     Text,
@@ -332,3 +333,39 @@ class VitaTurnEvent(Base):
     tokens_out: Mapped[int | None] = mapped_column(Integer)
     error_code: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = _timestamptz("created_at", default_now=True)
+
+
+VITA_ATTACHMENT_KINDS = ("image", "pdf")
+
+
+class VitaAttachment(Base):
+    """Adjunto efímero del chat Vita (Ola B, D6).
+
+    Guarda solo el binario validado y metadatos mínimos durante el TTL. No guarda
+    el nombre original del archivo ni texto extraído: el texto vive únicamente en
+    el turno que lo usa. No forma parte del expediente ni del RAG privado.
+    """
+
+    __tablename__ = "vita_attachments"
+    __table_args__ = (
+        CheckConstraint(f"kind IN {VITA_ATTACHMENT_KINDS}", name="ck_vita_attachments_kind"),
+        CheckConstraint("size_bytes > 0", name="ck_vita_attachments_size"),
+        CheckConstraint("expires_at > created_at", name="ck_vita_attachments_ttl"),
+        Index("ix_vita_attachments_patient", "patient_id", "expires_at"),
+        Index("ix_vita_attachments_expires_at", "expires_at"),
+        {"schema": SCHEMA},
+    )
+
+    id: Mapped[str] = _uuid()
+    patient_id: Mapped[str] = mapped_column(Uuid(as_uuid=False), nullable=False)
+    user_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    # thread_id del cliente (sin prefijo de usuario); opcional si aún no hay hilo.
+    thread_id: Mapped[str | None] = mapped_column(String(128))
+    kind: Mapped[str] = mapped_column(String(8), nullable=False)
+    content_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    page_count: Mapped[int | None] = mapped_column(Integer)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    content: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    created_at: Mapped[datetime] = _timestamptz("created_at", default_now=True)
+    expires_at: Mapped[datetime] = _timestamptz("expires_at")

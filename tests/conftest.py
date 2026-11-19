@@ -49,6 +49,7 @@ def pytest_asyncio_loop_factories(item):
         "test_vita_postgres.py",
         "test_vita_history_postgres.py",
         "test_voice_native_turns_postgres.py",
+        "test_vita_attachments_postgres.py",
     }:
         return {"vita_psycopg_selector": asyncio.SelectorEventLoop}
     # Si el hook está registrado, pytest-asyncio 1.4 exige mapping también
@@ -76,6 +77,7 @@ def history_unit_boundary(request, monkeypatch):
         "test_threads_state.py",
         "test_voice_transcript.py",
         "test_vita_opt_in.py",
+        "test_vita_attachments_postgres.py",
         "test_vita_voice.py",
         "test_voice.py",
         "test_conversation_recovery.py",
