@@ -392,8 +392,12 @@ def capability_scope(text: str, *, unambiguous: bool = False) -> str | None:
     ):
         return None
     patterns = {
-        "nutrition": r"\b(almuerzo|desayuno|cena|comida|menu|meal|lunch|breakfast|"
-        r"plan nutricional|alimentacion|mi dieta|my diet|nutrition plan|food plan|eating plan)\b",
+        "nutrition": r"\b(almuerzo|desayuno|cena|comida|comidas|menu|meal|meals|lunch|"
+        r"breakfast|dinner|plan nutricional|plan de nutricion|nutrition plan|nutritional plan|"
+        r"diet plan|meal plan|food plan|eating plan|alimentacion|mi dieta|my diet|dieta|diet|"
+        r"que debo comer|que como|comer hoy|what should i eat|what do i eat|what to eat|"
+        r"cual es mi plan|what is my plan|plan de hoy|plan del dia|mi plan de hoy|"
+        r"my plan today|my plan for today)\b",
         "assessments": r"\b(test|tests|pruebas|evaluaciones|assessment|assessments)\b",
         "podcast": r"\b(podcast|podcasts)\b",
         "exercise": r"\b(ejercicio|rutina|routine|workout|exercise|descanso|rest day|"

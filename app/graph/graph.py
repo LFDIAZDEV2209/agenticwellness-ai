@@ -106,6 +106,7 @@ def build_graph(
     Returns:
         Grafo compilado (acepta `.invoke`, `.ainvoke`, `.astream`).
     """
+    # `[]` = grafo final sin tools (saludo/servicio). `None` = grafo normal con tools.
     if prepare_tools is not None:
         return _build_final_graph(
             model=model or get_chat_model(temperature=None),

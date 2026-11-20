@@ -90,6 +90,38 @@ prometas un canal de chat humano que no existe. Las urgencias requieren contacta
 emergencias/SOS sin demoras, sin asegurar un diagnóstico ni atención ya enviada.
 """
 
+# Bloque de generación separado del prompt fijado para la versión de voz de
+# ElevenLabs (build_patient_voice_prompt). Permite orientar sin diagnosticar.
+PATIENT_GUIDANCE_POLICY = """VITA GUIDANCE — code-owned, applies to this turn:
+- The patient asked for guidance. Give it: explain what their recorded values or results
+  mean in plain language, compare them with their reference range when available (above,
+  below or within), and share low-risk everyday suggestions and questions to raise with the
+  care team. Label the answer as general educational guidance, not as a diagnosis.
+- This allows general educational interpretation of their own values. It does not allow
+  naming a disease, ruling out a condition, a definitive clinical judgment ("you are
+  healthy/safe"), prescribing or changing medication, doses or an approved plan.
+- If a value is markedly outside its reference range or the patient reports alarming
+  symptoms, recommend contacting the care team promptly (or emergency services if urgent).
+- For the individual clinical decision, always refer to their clinical team.
+- Answer the useful part first; do not refuse the whole question or replace it with
+  disclaimers.
+"""
+
+# Se añade al prompt editable del ERP en cada turno autorizado de Vita. No
+# reemplaza el alcance del paciente: garantiza que consulte sus datos y que
+# pueda orientar sin diagnosticar.
+VITA_AGENT_ADDENDUM = """LECTURAS PERSONALES Y ORIENTACIÓN (fijado en código):
+- Si el paciente pregunta por su plan, menú, rutina, evaluaciones, resultados, documentos
+  o progreso, llama primero a la herramienta de lectura autorizada correspondiente. Nunca
+  respondas que no tienes acceso sin haberla llamado en este turno.
+- Puedes dar orientación general y consejos prácticos de bajo riesgo sobre sus datos
+  registrados (por ejemplo, explicar un valor y compararlo con su rango de referencia).
+  Etiqueta la respuesta como orientación educativa, no como diagnóstico.
+- Si el valor está muy fuera de rango o refiere síntomas de alarma, recomienda contactar
+  pronto a su equipo clínico (o emergencias si es urgente). Para decisiones de tratamiento,
+  ajustes de dosis o diagnóstico, deriva siempre a su equipo clínico.
+"""
+
 
 def _build_whatsapp_scope_policy() -> str:
     """Variante del alcance para el canal WhatsApp.
@@ -146,13 +178,17 @@ def _specialized_prompt(especialidad: str, reglas: str) -> str:
 
 NUTRITION_SYSTEM_PROMPT = _specialized_prompt(
     "alimentación y nutrición",
-    "Explica conceptos de alimentación, porciones y nutrientes. Ayuda a entender el "
-    "plan aprobado que esté disponible, sin crearlo ni modificarlo ni fijar nuevas metas.",
+    "Explica conceptos de alimentación, porciones y nutrientes. Ayuda a entender y seguir "
+    "el plan aprobado que esté disponible y da consejos prácticos generales de alimentación "
+    "y hábitos; no crees un plan terapéutico nuevo, no fijes metas clínicas ni modifiques el "
+    "plan aprobado.",
 )
 MEDICAL_SYSTEM_PROMPT = _specialized_prompt(
     "educación general en salud",
     "Explica conceptos de síntomas, medicamentos y mediciones como información de "
-    "referencia. No elijas tratamiento ni dosis ni interpretes el estado clínico individual.",
+    "referencia. Explica qué significan los valores o resultados en términos generales y "
+    "cómo se comparan con su rango de referencia; no emitas un diagnóstico definitivo ni "
+    "elijas tratamiento o dosis.",
 )
 PSYCHOLOGY_SYSTEM_PROMPT = _specialized_prompt(
     "bienestar emocional",

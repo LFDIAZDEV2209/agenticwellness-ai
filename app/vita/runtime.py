@@ -223,15 +223,17 @@ async def resolve_turn(
         prepare.append("retrieve_knowledge")
     voice_model = settings.vita_voice_model if channel == "voice" else None
     voice_options = {"max_tokens": settings.vita_voice_max_tokens} if channel == "voice" else {}
+    # Solo saludos/servicio se responden sin tools. Cualquier otra consulta sin
+    # scope conserva el bucle de tools para poder leer el plan del paciente.
+    prepare_tools = None
+    if not plan_record and (prepare or service or decision.reason == "service_fast_path"):
+        prepare_tools = prepare
     graph = build_graph(
         model=get_chat_model(model=voice_model, temperature=None, **voice_options),
         checkpointer=base_graph.checkpointer,
         tools=tools,
         max_tool_calls=3,
-        prepare_tools=prepare
-        if not plan_record
-        and (direct_read or channel == "voice" or "retrieve_knowledge" in prepare)
-        else None,
+        prepare_tools=prepare_tools,
         final_after_tools=plan_record and channel == "voice",
         retrieval_scope="patient" if patient_retrieval else "program",
         record_topic=record_topic,

@@ -22,6 +22,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.knowledge_scope import resolve_knowledge_base_ids
+from app.agents.prompts import VITA_AGENT_ADDENDUM
 from app.agents.runtime_config import AgentRuntimeConfig
 from app.core.config import get_settings
 from app.db.models import AgentRuntimeConfig as AgentRuntimeConfigRow
@@ -340,6 +341,12 @@ class AgentRuntimeRegistry:
                 and config.retrieval_config.knowledge_base_ids
             ):
                 prepare.append("retrieve_knowledge")
+        # El prompt del ERP no conoce las lecturas de Vita; el addendum de código
+        # garantiza que consulte los datos del paciente y que pueda orientar.
+        config.prompt = "\n\n".join(filter(None, [config.prompt, VITA_AGENT_ADDENDUM]))
+        # Sin lectura ni RAG que precargar se conserva el bucle de tools: en voz
+        # el grafo final sin tools haría responder «no tengo acceso» al plan.
+        prepare = prepare or None
         return await self._compile(
             compiled.agent_type_id,
             compiled.version_id,

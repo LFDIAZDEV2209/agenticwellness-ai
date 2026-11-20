@@ -24,6 +24,7 @@ from langgraph.checkpoint.memory import MemorySaver
 
 from app.agents.prompts import (
     BASE_SYSTEM_PROMPT,
+    PATIENT_GUIDANCE_POLICY,
     PATIENT_SCOPE_POLICY,
     build_control_guidance,
 )
@@ -147,12 +148,18 @@ def test_absent_context_prompt_and_payload_identical_to_baseline(recording_clien
     assert body["agent"] == "base"
     assert body.get("control_signal") is None
 
-    # Sin contexto de control: base y guía general, sin bloque de control.
+    # Sin contexto de control: alcance, guía educativa, perfil y sin bloque de control.
     assert len(fake.prompts) == 1
     prompt = fake.prompts[0]
-    assert [type(m).__name__ for m in prompt] == ["SystemMessage", "HumanMessage", "HumanMessage"]
+    assert [type(m).__name__ for m in prompt] == [
+        "SystemMessage",
+        "SystemMessage",
+        "HumanMessage",
+        "HumanMessage",
+    ]
     assert prompt[0].content == PATIENT_SCOPE_POLICY
-    assert json.loads(prompt[1].content.split("\n", 1)[1])["profile"] == BASE_SYSTEM_PROMPT
+    assert prompt[1].content == PATIENT_GUIDANCE_POLICY
+    assert json.loads(prompt[2].content.split("\n", 1)[1])["profile"] == BASE_SYSTEM_PROMPT
     assert prompt[-1].content == "hola"
 
 
@@ -198,9 +205,10 @@ def test_guidance_is_only_addition_when_context_present(recording_client):
     baseline, guided = fake.prompts[0], fake.prompts[1]
     assert len(guided) == len(baseline) + 1
     assert guided[0].content == baseline[0].content  # sistema base idéntico
+    assert guided[1].content == baseline[1].content  # guía educativa idéntica
     assert guided[-1].content == baseline[-1].content  # humano idéntico
-    assert isinstance(guided[1], SystemMessage)
-    assert guided[1].content == build_control_guidance(day=3, status="sent", exam_pending=True)
+    assert isinstance(guided[2], SystemMessage)
+    assert guided[2].content == build_control_guidance(day=3, status="sent", exam_pending=True)
 
 
 def test_guidance_block_static_contract():

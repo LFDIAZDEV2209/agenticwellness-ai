@@ -20,6 +20,7 @@ from langgraph.types import Overwrite
 
 from app.agents.prompts import (
     BASE_SYSTEM_PROMPT,
+    PATIENT_GUIDANCE_POLICY,
     PATIENT_SCOPE_POLICY,
     SERVICE_DELIVERY_POLICY,
     TEXT_DELIVERY_POLICY,
@@ -432,6 +433,9 @@ def make_agent_node(
             # no ofrece agendamiento.
             WHATSAPP_SCOPE_POLICY if channel == "whatsapp" else PATIENT_SCOPE_POLICY
         ]
+        # Orientación educativa permitida sin diagnosticar (separada del prompt
+        # fijado para la versión de voz de ElevenLabs).
+        system_blocks.append(PATIENT_GUIDANCE_POLICY)
         if final_response:
             system_blocks.append(
                 "FINAL ANSWER: All authorized reads for this turn are already supplied. "

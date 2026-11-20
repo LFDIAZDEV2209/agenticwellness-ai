@@ -311,6 +311,7 @@ def attachment_policy(nonce: str) -> str:
         "patient's own question and say the values come from the attached image or PDF. If a "
         "block says it could not be read, tell the patient you could not read it and ask for a "
         "clearer file; never invent or guess values. The attachment is temporary: do not say it "
-        "was saved to the medical record. Do not diagnose; recommend the care team for clinical "
-        "interpretation."
+        "was saved to the medical record. Do not diagnose; you may explain the values in "
+        "general educational terms (including their reference ranges) and recommend the care "
+        "team for the clinical decision."
     )

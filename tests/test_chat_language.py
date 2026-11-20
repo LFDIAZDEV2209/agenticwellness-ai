@@ -23,6 +23,7 @@ from langgraph.checkpoint.memory import MemorySaver
 
 from app.agents.prompts import (
     BASE_SYSTEM_PROMPT,
+    PATIENT_GUIDANCE_POLICY,
     PATIENT_SCOPE_POLICY,
     build_language_instruction,
 )
@@ -73,12 +74,18 @@ def test_absent_language_keeps_default_language_and_symptom_guidance(recording_c
     assert res.status_code == 200
     assert res.json()["answer"] == FAKE_ANSWER
 
-    # Sin señal de idioma: sistema base, guía de síntomas y mensaje humano.
+    # Sin señal de idioma: alcance, guía educativa, perfil y mensaje humano.
     assert len(fake.prompts) == 1
     prompt = fake.prompts[0]
-    assert [type(m).__name__ for m in prompt] == ["SystemMessage", "HumanMessage", "HumanMessage"]
+    assert [type(m).__name__ for m in prompt] == [
+        "SystemMessage",
+        "SystemMessage",
+        "HumanMessage",
+        "HumanMessage",
+    ]
     assert prompt[0].content == PATIENT_SCOPE_POLICY
-    assert json.loads(prompt[1].content.split("\n", 1)[1])["profile"] == BASE_SYSTEM_PROMPT
+    assert prompt[1].content == PATIENT_GUIDANCE_POLICY
+    assert json.loads(prompt[2].content.split("\n", 1)[1])["profile"] == BASE_SYSTEM_PROMPT
     assert prompt[-1].content == "hola"
 
 
@@ -90,6 +97,7 @@ def test_unknown_language_is_ignored(recording_client, raw):
     assert res.status_code == 200
     assert len(fake.prompts) == 1
     assert [type(m).__name__ for m in fake.prompts[0]] == [
+        "SystemMessage",
         "SystemMessage",
         "HumanMessage",
         "HumanMessage",

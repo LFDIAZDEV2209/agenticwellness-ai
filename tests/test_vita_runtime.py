@@ -55,6 +55,12 @@ from tests.test_runtime_registry import AGENT_ID, VERSION_ID, make_session_with_
         ("My assessments for today", "assessments"),
         ("Mi progreso para hoy", "progress"),
         ("My progress for today", "progress"),
+        # Frases reales del incidente 20-11 (app/voz): «no tengo acceso a tu plan».
+        ("¿Cuál es mi plan de hoy?", "nutrition"),
+        ("Cuál es mi plan de hoy", "nutrition"),
+        ("What should be my nutritional plan?", "nutrition"),
+        ("¿Qué debo comer hoy?", "nutrition"),
+        ("¿Qué como hoy?", "nutrition"),
     ],
 )
 def test_representative_personal_queries_have_selective_read_route(text, scope):

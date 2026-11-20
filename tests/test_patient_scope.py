@@ -7,6 +7,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.checkpoint.memory import MemorySaver
 
 from app.agents.prompts import (
+    PATIENT_GUIDANCE_POLICY,
     PATIENT_SCOPE_POLICY,
     WHATSAPP_SCOPE_POLICY,
     build_patient_voice_prompt,
@@ -80,7 +81,7 @@ async def test_memory_experience_and_legacy_system_history_cannot_inject_new_sys
         config={"configurable": {"thread_id": "legacy-policy"}},
     )
     system = [m.content for m in model.prompts[0] if isinstance(m, SystemMessage)]
-    assert system == [PATIENT_SCOPE_POLICY]
+    assert system == [PATIENT_SCOPE_POLICY, PATIENT_GUIDANCE_POLICY]
     assert any(override in m.content for m in model.prompts[0] if isinstance(m, HumanMessage))
 
 
@@ -91,6 +92,41 @@ def test_voice_and_text_share_exact_code_owned_patient_scope(language):
     assert "OTC" in PATIENT_SCOPE_POLICY
     assert "already approved" in PATIENT_SCOPE_POLICY
     assert "Do not invent a local emergency number" in PATIENT_SCOPE_POLICY
+
+
+def test_patient_scope_allows_general_guidance_about_own_values():
+    """El paciente pidió consejo: se permite orientar, sin diagnóstico."""
+    assert "compare them with their reference range" in PATIENT_GUIDANCE_POLICY
+    assert "not as a diagnosis" in PATIENT_GUIDANCE_POLICY
+    assert "do not refuse the whole question" in PATIENT_GUIDANCE_POLICY
+    # Sigue prohibido diagnosticar o cambiar tratamiento.
+    assert "It does not allow" in PATIENT_GUIDANCE_POLICY
+    assert "prescribing or changing medication" in PATIENT_GUIDANCE_POLICY
+
+
+def test_empty_prepare_is_service_only_and_none_keeps_tools():
+    """Regresión 20-11: `[]` = respuesta final sin tools (solo saludo/servicio);
+    `None` conserva el bucle de tools para poder leer el plan."""
+    from app.tools.registry import TOOLS_BY_NAME
+
+    tool = TOOLS_BY_NAME["get_my_nutrition"]
+    model = RecordingFakeModel(responses=[AIMessage(content="ok")])
+    normal = build_graph(model=model, checkpointer=MemorySaver(), tools=[tool], prepare_tools=None)
+    assert "agent" in normal.get_graph().nodes
+    assert "prepare" not in normal.get_graph().nodes
+
+    service = build_graph(model=model, checkpointer=MemorySaver(), tools=[tool], prepare_tools=[])
+    assert "prepare" not in service.get_graph().nodes
+    assert "answer" in service.get_graph().nodes
+
+    prepared = build_graph(
+        model=model,
+        checkpointer=MemorySaver(),
+        tools=[tool],
+        prepare_tools=["get_my_nutrition"],
+    )
+    assert "prepare" in prepared.get_graph().nodes
+    assert "answer" in prepared.get_graph().nodes
 
 
 async def test_patient_scope_is_reinjected_after_each_tool_round():
