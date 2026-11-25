@@ -11,12 +11,11 @@ from typing import Literal
 
 from anyio import CancelScope
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
-from langchain_core.messages import AIMessageChunk
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.api.deps import get_db_session, get_graph
 from app.api.message_text import extract_message_text
-from app.api.routes.chat import _build_config, _check_rate_limit, _extract_answer
+from app.api.routes.chat import _build_config, _check_rate_limit, _last_ai_message
 from app.api.schemas import ChatRequest
 from app.api.streaming import ClosingStreamingResponse as StreamingResponse
 from app.core.config import get_settings
@@ -27,9 +26,9 @@ from app.observability.turn_trace import (
     error_code,
     persist_turn,
 )
+from app.safety.vita_delivery import classify_output, fallback_text, fingerprint, safety_reason
 from app.vita.client import VitaAccessError, read_catalog
 from app.vita.locking import ThreadBusyError
-from app.vita.routing import LEGACY_APPLICATION_NAME
 from app.vita.runtime import resolve_turn
 from app.voice.context import verify_context
 from app.voice.delivery import VoiceSentenceEmitter, voice_turn_has_results
@@ -228,6 +227,7 @@ async def completion(
             "user_message_id": f"voice:{session_id}:{ordinal}:user",
             "assistant_message_id": admission.response_message_id,
             "message_channel": "voice",
+            "vita_safety": True,
             "voice_session_id": record.id,
             "voice_user_text": payload.messages[latest_user_index(payload.messages)].content,
         }
@@ -331,8 +331,27 @@ async def completion(
                     )
                     if replay_message is None:
                         raise VoiceContextError("voice_receipt_without_checkpoint", 409)
+                    saved = extract_message_text(replay_message.content)
+                    stored_reason = safety_reason(replay_message)
+                    reason = stored_reason or classify_output(saved)
+                    if reason and not stored_reason:
+                        audit = TurnTraceCollector(
+                            thread_id=config["configurable"]["thread_id"],
+                            channel="voice",
+                            patient_id=record.patient_id or record.user_id,
+                            agent_id=record.agent_id,
+                        )
+                        audit.record_safety_block(fingerprint(saved), reason)
+                        await persist_turn(
+                            audit.finish(
+                                status="rejected",
+                                error_code=reason,
+                                message_ref=admission.response_message_id,
+                            )
+                        )
+                        await voice_store.check_current(admission, completed_ok=True)
                     text = VoiceSentenceEmitter(request.language).finish(
-                        extract_message_text(replay_message.content),
+                        fallback_text(reason, request.language) if reason else saved,
                         has_results=voice_turn_has_results(current.values or {}),
                         allow_standalone=True,
                     )
@@ -378,9 +397,6 @@ async def completion(
         text_chars = 0
         state, completed = None, False
         emitter = VoiceSentenceEmitter(request.language)
-        # El resultado formateado antepone la corrección y preserva la prioridad de seguridad.
-        defer_product_correction = bool(LEGACY_APPLICATION_NAME.search(request.message))
-        saw_text_chunk = False
         next_access_check = time.monotonic() + 1
         failure: str | None = None
         graph = AdmittedVoiceGraph(
@@ -410,34 +426,14 @@ async def completion(
                         break
                     if mode == "values":
                         state = chunk
-                    elif mode == "messages" and not defer_product_correction:
-                        message, metadata = chunk
-                        if (
-                            metadata.get("langgraph_node") == "answer"
-                            and isinstance(message, AIMessageChunk)
-                            and not getattr(message, "tool_calls", None)
-                            and not getattr(message, "tool_call_chunks", None)
-                        ):
-                            fragment = extract_message_text(message.content)
-                            if not fragment:
-                                continue
-                            saw_text_chunk = True
-                            text = emitter.feed(fragment)
-                            if not text:
-                                continue
-                            if first_token_ms is None:
-                                first_token_ms = int((time.perf_counter() - started) * 1000)
-                            await voice_store.check_current(admission)
-                            text_chars += len(text)
-                            yield _chunk(admission.response_message_id, text)
-                if state is None:
-                    raise VoiceContextError("voice_stream_incomplete", 502)
-                # El snapshot final aporta frases formateadas que todavía
-                # caben. No se añade una cola sin cierre del stream del modelo.
+                message = _last_ai_message(state)
+                if message is None:
+                    raise RuntimeError("voice_stream_incomplete")
+                # Solo se entrega el mensaje final que ya pasó el validador del grafo.
                 text = emitter.finish(
-                    _extract_answer(state),
+                    extract_message_text(message.content),
                     has_results=voice_turn_has_results(state),
-                    allow_standalone=not saw_text_chunk,
+                    allow_standalone=True,
                 )
                 if text:
                     if first_token_ms is None:
@@ -450,23 +446,33 @@ async def completion(
                 completed = True
                 yield _chunk(admission.response_message_id, done=True)
                 yield "data: [DONE]\n\n"
-        except (VoiceContextError, VitaAccessError, TimeoutError, ThreadBusyError) as exc:
+        except (VoiceContextError, VitaAccessError, ThreadBusyError) as exc:
             if str(exc) == "voice_turn_obsolete":
                 failure = "voice_turn_obsolete"
                 yield _chunk(admission.response_message_id, done=True)
                 yield "data: [DONE]\n\n"
             else:
-                failure = "turn_timeout" if isinstance(exc, TimeoutError) else error_code(exc)
+                failure = error_code(exc)
                 _log_failure("generate", exc)
                 yield 'data: {"error":{"code":"voice_turn_interrupted"}}\n\n'
         except asyncio.CancelledError:
             failure = "cancelled"
             raise
         except Exception as exc:
-            failure = error_code(exc)
-            # Nunca serializar errores del proveedor/modelo: pueden contener PHI.
+            failure = "provider_failure"
             _log_failure("generate", exc)
-            yield 'data: {"error":{"code":"voice_runtime_error"}}\n\n'
+            try:
+                await voice_store.check_current(admission)
+                await read_catalog(record.user_id)
+            except (VoiceContextError, VitaAccessError):
+                # Una revocación sigue cerrando el turno sin emitir texto.
+                pass
+            else:
+                yield _chunk(
+                    admission.response_message_id, fallback_text(failure, request.language)
+                )
+            yield _chunk(admission.response_message_id, done=True)
+            yield "data: [DONE]\n\n"
         finally:
             # Starlette cancela dentro de un CancelScope. Sin shield, ese scope
             # puede interrumpir la limpieza antes de propagar la cancelación a
@@ -482,11 +488,21 @@ async def completion(
                 with suppress(Exception):
                     await stream.aclose()
                 if completed:
-                    rejected = (state or {}).get("guardrail", {}).get("safe") is False
+                    reason = safety_reason(_last_ai_message(state))
+                    rejected = (
+                        bool(reason) or (state or {}).get("guardrail", {}).get("safe") is False
+                    )
+                    status = (
+                        "failed"
+                        if reason in {"provider_failure", "empty_answer"}
+                        else "rejected"
+                        if rejected
+                        else "completed"
+                    )
                     await persist_turn(
                         collector.finish(
-                            status="rejected" if rejected else "completed",
-                            error_code="guardrail_rejected" if rejected else None,
+                            status=status,
+                            error_code=reason or ("guardrail_rejected" if rejected else None),
                             model=turn.model,
                             message_ref=admission.response_message_id,
                             agent_id=turn.agent_id,

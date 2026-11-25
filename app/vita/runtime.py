@@ -14,6 +14,7 @@ from app.agents.runtime_registry import registry as runtime_registry
 from app.core.config import get_settings
 from app.graph.graph import build_graph
 from app.llm.factory import get_chat_model
+from app.safety.vita_delivery import prohibited_input
 from app.tools.registry import TOOLS_BY_NAME, legacy_tools
 from app.tools.retrieval import authorized_patient_id, make_retrieve_tool
 from app.tools.vita import RECORD_TOPIC_TOOLS, VITA_READ_TOOL_NAMES, VITA_RECORD_TOOL_NAMES
@@ -102,6 +103,20 @@ async def resolve_turn(
     channel: str = "text",
 ) -> ResolvedTurn:
     catalog = TypeAdapter(list[AuthorizedAgent]).validate_python(await read_catalog(user_id))
+    configurable = config["configurable"]
+    if configurable.get("vita_safety") and prohibited_input(
+        configurable.get("voice_user_text") or text
+    ):
+        # Después de autorizar la cuenta, pero antes de llamar al clasificador de routing.
+        return ResolvedTurn(
+            LockedGraph(base_graph, "safety_preflight"),
+            "base",
+            None,
+            None,
+            None,
+            get_settings().recursion_limit,
+            "safety_preflight",
+        )
     snapshot = await base_graph.aget_state(config)
     previous_state = (snapshot.values or {}) if snapshot else {}
     previous = previous_state.get("agent")
@@ -109,7 +124,6 @@ async def resolve_turn(
     scope = capability_scope(text)
     documentation = documentation_query(text)
     private_query = patient_document_query(text)
-    configurable = config["configurable"]
     allow_patient_rag = (
         channel in {"text", "voice", "whatsapp"}
         and configurable.get("user_id") == user_id

@@ -2,7 +2,7 @@
 
 `TurnTraceCollector` es un callback de LangChain que se adjunta a la config del
 grafo. Registra SOLO metadata técnica: nodo, tool, modelo, estado, latencia,
-tokens y un código de error normalizado. Por diseño nunca lee ni guarda
+tokens, códigos de error y huellas de salidas rechazadas. Por diseño nunca lee ni guarda
 entradas/salidas (mensajes del paciente, respuestas, resultados de tools,
 prompts ni excepciones con su texto): lo que no se captura no puede filtrarse.
 
@@ -29,6 +29,7 @@ from langchain_core.callbacks import AsyncCallbackHandler
 from langchain_core.messages import ToolMessage
 
 from app.llm.cost import SessionStats
+from app.safety.vita_delivery import FALLBACK_REASONS, SAFETY_EVENT
 
 logger = logging.getLogger(__name__)
 
@@ -219,8 +220,22 @@ class TurnTraceCollector(AsyncCallbackHandler):
         self._close(run_id, "error", error_code=error_code(error))
 
     # -- política del nodo de tools -------------------------------------------
+    def record_safety_block(self, digest: object, reason: object) -> None:
+        if (
+            isinstance(digest, str)
+            and re.fullmatch(r"sha256:[a-f0-9]{64}", digest)
+            and isinstance(reason, str)
+            and reason in FALLBACK_REASONS
+        ):
+            self._append("policy", digest, "blocked", latency_ms=0, error_code=reason)
+
     async def on_custom_event(self, name, data, *, run_id, **kwargs) -> None:
-        if name != POLICY_EVENT or not isinstance(data, dict):
+        if not isinstance(data, dict):
+            return
+        if name == SAFETY_EVENT:
+            self.record_safety_block(data.get("fingerprint"), data.get("reason"))
+            return
+        if name != POLICY_EVENT:
             return
         self._append(
             "policy",
