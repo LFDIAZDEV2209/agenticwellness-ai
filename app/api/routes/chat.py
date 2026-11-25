@@ -31,6 +31,7 @@ from app.api.streaming import ClosingStreamingResponse as StreamingResponse
 from app.core.config import get_settings
 from app.core.errors import CoppAiError
 from app.core.logging import get_logger
+from app.graph.language import detect_turn_language
 from app.history.service import history_service
 from app.memory.adaptive import AdaptiveMemoryService
 from app.observability.executions import ExecutionTracker
@@ -41,6 +42,7 @@ from app.observability.turn_trace import (
     persist_turn,
 )
 from app.safety.guardrails import RateLimiter
+from app.safety.vita_delivery import fallback_message, safety_reason
 from app.vita.locking import ThreadBusyError
 from app.voice.store import VoiceContextError
 
@@ -136,6 +138,7 @@ def _build_config(
         # El canal viene fijado en el request (no de `agent`, que el routing de
         # Vita reescribe con el especialista elegido).
         configurable["message_channel"] = request.channel
+        configurable["vita_safety"] = _uses_vita_safety(request)
         if request.channel_message_id:
             configurable["channel_message_id"] = request.channel_message_id
         if request.user_id:
@@ -178,6 +181,29 @@ def _is_vita_request(request: ChatRequest) -> bool:
         and request.supports_vita
         and _vita_channel_enabled(request)
     )
+
+
+def _uses_vita_safety(request: ChatRequest) -> bool:
+    # La política no desaparece al desactivar el routing Vita. El playground
+    # ERP no se convierte en un canal de paciente por el flag global.
+    return request.supports_vita is True or request.channel == "whatsapp"
+
+
+def _provider_fallback_state(request: ChatRequest) -> dict:
+    language = detect_turn_language({"input": request.message}) or request.language
+    return {"messages": [fallback_message("provider_failure", language)]}
+
+
+def _last_ai_message(state: dict | None) -> AIMessage | None:
+    messages = (state or {}).get("messages", [])
+    start = (state or {}).get("turn_start_index", 0)
+    if (
+        len(messages) > start
+        and isinstance(messages[-1], AIMessage)
+        and not messages[-1].tool_calls
+    ):
+        return messages[-1]
+    return None
 
 
 def _history_opt_in(request: ChatRequest) -> bool:
@@ -392,7 +418,11 @@ async def _close_turn(
     model: str | None,
 ) -> None:
     message_ref, state_error = _turn_outcome(state if status == "completed" else None)
-    if status == "completed" and (state or {}).get("guardrail", {}).get("safe") is False:
+    reason = safety_reason(_last_ai_message(state))
+    if reason:
+        status = "failed" if reason in {"provider_failure", "empty_answer"} else "rejected"
+        error = reason
+    elif status == "completed" and (state or {}).get("guardrail", {}).get("safe") is False:
         status, error = "rejected", "guardrail_rejected"
     trace = collector.finish(
         status=status,
@@ -436,7 +466,8 @@ async def chat(
         graph = base_graph
     graph = _with_transcript_lock(graph, force=history_binding is not None)
 
-    tracker = ExecutionTracker(session, redact_content=_redact_execution(request))
+    protected = _uses_vita_safety(request)
+    tracker = ExecutionTracker(session, redact_content=_redact_execution(request) or protected)
     execution_id = await tracker.start(
         thread_id=thread_id,
         agent_type_id=request.agent_type_id or request.agent or "base",
@@ -472,6 +503,8 @@ async def chat(
                 else get_settings().llm_invoke_timeout
             ),
         )
+        if protected and _last_ai_message(result) is None:
+            result = _provider_fallback_state(request)
         await tracker.complete(
             execution_id,
             result_state=result,
@@ -495,45 +528,25 @@ async def chat(
         await tracker.fail(execution_id, error="history_turn_rejected", latency_ms=0)
         await session.commit()
         raise HTTPException(status_code=getattr(exc, "status", 409), detail=str(exc)) from exc
-    except CoppAiError as exc:
-        turn_error = error_code(exc)
-        _log_execution_error("Error ejecutando el grafo", vita=_redact_execution(request))
-        await tracker.fail(
-            execution_id,
-            error=str(exc),
-            latency_ms=int((time.perf_counter() - started) * 1000),
-        )
-        await session.commit()
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-    except TimeoutError:
-        turn_error = "turn_timeout"
-        logger.error("Timeout del agente")
-        await tracker.fail(
-            execution_id,
-            error="Timeout del agente",
-            latency_ms=int((time.perf_counter() - started) * 1000),
-        )
-        await session.commit()
-        raise HTTPException(
-            status_code=500, detail="No fue posible procesar la solicitud."
-        ) from None
     except Exception as exc:
-        turn_error = error_code(exc)
-        # Cualquier error no tipado (p. ej. fallo de la API del LLM) debe
-        # actualizar el estado de la ejecución y devolver un mensaje seguro,
-        # no dejar la execution en RUNNING para siempre.
+        turn_error = "turn_timeout" if isinstance(exc, TimeoutError) else error_code(exc)
         _log_execution_error(
-            "Error no controlado ejecutando el grafo", vita=_redact_execution(request)
+            "Error ejecutando el grafo", vita=_redact_execution(request) or protected
         )
         await tracker.fail(
             execution_id,
-            error=str(exc),
+            error=turn_error if protected else str(exc),
             latency_ms=int((time.perf_counter() - started) * 1000),
         )
-        await session.commit()
-        raise HTTPException(
-            status_code=500, detail="No fue posible procesar la solicitud."
-        ) from exc
+        if not protected:
+            await session.commit()
+            detail = (
+                str(exc)
+                if isinstance(exc, CoppAiError)
+                else "No fue posible procesar la solicitud."
+            )
+            raise HTTPException(status_code=500, detail=detail) from exc
+        result = _provider_fallback_state(request)
 
     finally:
         # Event log append-only: best-effort, nunca cambia la respuesta del canal.
@@ -645,7 +658,8 @@ async def chat_stream(
         graph = base_graph
     graph = _with_transcript_lock(graph, force=history_binding is not None)
 
-    tracker = ExecutionTracker(session, redact_content=_redact_execution(request))
+    protected = _uses_vita_safety(request)
+    tracker = ExecutionTracker(session, redact_content=_redact_execution(request) or protected)
     execution_id = await tracker.start(
         thread_id=thread_id,
         agent_type_id=request.agent_type_id or request.agent or "base",
@@ -695,6 +709,8 @@ async def chat_stream(
                         final_state = chunk
                     continue
                 if mode == "messages":
+                    if protected:
+                        continue  # Nunca emitir callbacks crudos del modelo o del planificador.
                     message_chunk, metadata = chunk
                     # Solo transmitir tokens de AIMessage/AIMessageChunk, no HumanMessage
                     if not isinstance(message_chunk, (AIMessage, AIMessageChunk)):
@@ -774,6 +790,8 @@ async def chat_stream(
                         flow_trace.append(entry)
                         payload = json.dumps({"type": "flow", **entry}, ensure_ascii=False)
                         yield f"event: flow\ndata: {payload}\n\n"
+            if protected and _last_ai_message(final_state) is None:
+                final_state = _provider_fallback_state(request)
             turn_status, turn_error = (
                 ("completed", None) if final_state is not None else ("failed", "stream_interrupted")
             )
@@ -784,8 +802,12 @@ async def chat_stream(
             )
             _log_execution_error("Error en el stream del agente", vita=_redact_execution(request))
             error = "No fue posible procesar la solicitud."
-            payload = json.dumps({"type": "error", "error": error}, ensure_ascii=False)
-            yield f"event: error\ndata: {payload}\n\n"
+            if protected and not isinstance(exc, (VoiceContextError, ThreadBusyError)):
+                final_state = _provider_fallback_state(request)
+            else:
+                final_state = None
+                payload = json.dumps({"type": "error", "error": error}, ensure_ascii=False)
+                yield f"event: error\ndata: {payload}\n\n"
         finally:
             with CancelScope(shield=True):
                 try:
@@ -830,6 +852,11 @@ async def chat_stream(
                 )
             ],
         }
+        if protected and final_state is not None:
+            answer = _extract_answer(final_state)
+            done_payload["answer"] = answer
+            payload = json.dumps({"type": "token", "content": answer}, ensure_ascii=False)
+            yield f"event: message\ndata: {payload}\n\n"
         if attachment_context is not None:
             done_payload["attachments"] = [
                 a.model_dump() for a in _attachment_results(attachment_context)

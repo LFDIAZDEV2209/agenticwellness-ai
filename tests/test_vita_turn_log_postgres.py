@@ -16,6 +16,7 @@ from alembic import command
 from app.db.models import VitaTurn, VitaTurnEvent
 from app.graph.graph import build_graph
 from app.observability.turn_trace import TurnTraceCollector, attach_collector, persist_turn
+from app.safety.vita_delivery import fingerprint, safety_reason
 from app.tools.registry import TOOLS_BY_NAME
 from tests.fakes import FakeToolAwareModel
 from tests.test_vita_history_postgres import isolated_test_url
@@ -106,6 +107,37 @@ async def test_event_log_persiste_turno_y_revierte_migracion(caplog):
             value not in caplog.text for value in ("fixture-request", "fixture-answer", thread_id)
         )
         caplog.clear()
+        blocked = "La dosis indicada es 50 mg. CANDIDATO SINTÉTICO."
+        safety = TurnTraceCollector(thread_id=thread_id, channel="voice", patient_id="fixture")
+        protected_graph = build_graph(
+            model=FakeToolAwareModel(responses=[AIMessage(content=blocked)]),
+            checkpointer=MemorySaver(),
+            tools=[],
+        )
+        state = await protected_graph.ainvoke(
+            {"input": "Quiero consejos de bienestar."},
+            config=attach_collector(
+                {"configurable": {"thread_id": thread_id, "vita_safety": True}}, safety
+            ),
+        )
+        safe_message = state["messages"][-1]
+        reason = safety_reason(safe_message)
+        assert reason == "clinical_output"
+        safety_id = await persist_turn(
+            safety.finish(status="rejected", error_code=reason, message_ref=safe_message.id),
+            session_factory=sessions,
+        )
+        assert safety_id
+        async with sessions() as session:
+            turn = await session.get(VitaTurn, safety_id)
+            event = await session.scalar(
+                select(VitaTurnEvent).where(
+                    VitaTurnEvent.turn_id == safety_id, VitaTurnEvent.status == "blocked"
+                )
+            )
+            assert turn.status == "rejected" and turn.error_code == event.error_code == reason
+            assert turn.message_ref == safe_message.id and event.name == fingerprint(blocked)
+        assert blocked not in caplog.text
         command.downgrade(cfg, PREVIOUS)
         with sync.connect() as connection:
             assert set(inspect(connection).get_table_names(schema="ai")) == before | {

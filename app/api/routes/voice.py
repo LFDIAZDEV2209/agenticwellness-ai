@@ -46,6 +46,13 @@ async def create_voice_session(payload: VoiceSessionRequest) -> VoiceSessionResp
     if not settings.voice_enabled:
         logger.warning("Voice session solicitada con VOICE_ENABLED=false")
         raise HTTPException(status_code=503, detail="Voz deshabilitada en este entorno.")
+    if (
+        payload.supports_vita_voice
+        and settings.vita_runtime_enabled
+        and not settings.vita_voice_enabled
+    ):
+        # Vita no debe degradarse a audio directo del proveedor, que omite el validador.
+        raise HTTPException(status_code=503, detail="vita_voice_safety_unavailable")
     if settings.vita_voice_enabled and payload.supports_vita_voice:
         from app.vita.client import VitaAccessError
         from app.voice.vita_session import create_vita_session

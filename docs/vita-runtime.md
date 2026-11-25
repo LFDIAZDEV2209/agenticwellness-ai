@@ -70,6 +70,11 @@ despliegue, secretos nuevos ni cambios de configuración remota desde este carri
 
 ## Activación y compatibilidad
 
+KAN-164 modifica la entrega de texto y voz para clientes Vita. La respuesta solo se
+publica después de validar el turno completo. Con Vita activo, si el adaptador de
+voz está apagado no se ofrece la voz legacy a un cliente Vita.
+[Política de entrega y pruebas](vita-safety-kan164.md)
+
 `VITA_RUNTIME_ENABLED=false` y `VITA_VOICE_ENABLED=false` por defecto. El adaptador
 también exige `VOICE_ENABLED` y `VITA_VOICE_TRANSPORT_VERIFIED`, una versión y agente
 Custom LLM dedicados y secretos configurados. El modo remoto anterior permanece como

@@ -41,6 +41,16 @@ from app.graph.state import AgentState
 from app.memory.adaptive import AdaptiveMemoryService
 from app.memory.service import UserMemoryService
 from app.safety.guardrails import check_input_guardrails
+from app.safety.vita_delivery import (
+    GENERATION_POLICY,
+    SAFETY_EVENT,
+    VITA_TOOL_ALLOWLIST,
+    classify_output,
+    fallback_message,
+    fingerprint,
+    prohibited_input,
+    safety_reason,
+)
 from app.tools.catalog import conversion_failures, tool_label
 from app.tools.policy import TOOL_SPECS, filter_for_channel, resolve_channel, spec_for
 from app.tools.registry import TOOLS_BY_NAME, legacy_tools, patient_tools
@@ -135,6 +145,37 @@ def guardrails_node(state: AgentState, *, record_topic: str | None = None) -> di
     }
     if configurable.get("vita_history") is not None:
         turn_state.update(memory_context="", experience_context="")
+
+    if result.safe and configurable.get("vita_safety") and prohibited_input(visible_input):
+        fallback = fallback_message(
+            "clinical_topic",
+            detect_turn_language({"input": visible_input}) or configurable.get("language"),
+        )
+        fallback.id = configurable.get("assistant_message_id")
+        fallback.additional_kwargs.update(message_metadata)
+        if configurable.get("execution_id"):
+            fallback.additional_kwargs["execution_id"] = configurable["execution_id"]
+        return {
+            **turn_state,
+            "guardrail": {"safe": False, "reason": "clinical_topic"},
+            "messages": turn_messages(
+                [
+                    HumanMessage(
+                        content=visible_input,
+                        id=configurable.get("user_message_id"),
+                        additional_kwargs={
+                            **message_metadata,
+                            "status": (
+                                "provider_input"
+                                if message_metadata["channel"] == "voice"
+                                else "final"
+                            ),
+                        },
+                    ),
+                    fallback,
+                ]
+            ),
+        }
 
     if not result.safe:
         return {
@@ -377,6 +418,7 @@ def make_agent_node(
         active_prompt = profile.system_prompt if profile else system_prompt
         configurable = get_config().get("configurable", {})
         voice = configurable.get("message_channel") == "voice"
+        protected = configurable.get("vita_safety") is True
         record_tools = RECORD_TOPIC_TOOLS.get(state.get("record_topic"), ()) if voice else ()
         first_plan = (
             not final_response
@@ -393,6 +435,8 @@ def make_agent_node(
                     resolve_channel(configurable, profile.key if profile else None),
                 )
             )
+            if protected:
+                active_tools = [tool for tool in active_tools if tool.name in VITA_TOOL_ALLOWLIST]
             if record_tools:
                 active_tools = [tool for tool in active_tools if tool.name in record_tools]
             if first_plan and len(active_tools) == 1:
@@ -435,7 +479,7 @@ def make_agent_node(
         ]
         # Orientación educativa permitida sin diagnosticar (separada del prompt
         # fijado para la versión de voz de ElevenLabs).
-        system_blocks.append(PATIENT_GUIDANCE_POLICY)
+        system_blocks.append(GENERATION_POLICY if protected else PATIENT_GUIDANCE_POLICY)
         if final_response:
             system_blocks.append(
                 "FINAL ANSWER: All authorized reads for this turn are already supplied. "
@@ -516,13 +560,44 @@ def make_agent_node(
             prompt = _with_attachment_data(context, attachment_block)
         utterance = state.get("input", "")
         product_reply = application_name_reply(utterance, language) if voice else None
-        response = (
-            AIMessage(content=product_reply)
-            if product_reply is not None
-            else await active_model.ainvoke(prompt)
-        )
+        provider_failed = False
+        try:
+            response = (
+                AIMessage(content=product_reply)
+                if product_reply is not None
+                else await active_model.ainvoke(prompt)
+            )
+        except Exception as exc:
+            if not protected:
+                raise
+            logger.warning("vita_provider_failure error_type=%s", type(exc).__name__)
+            provider_failed = True
+            response = fallback_message("provider_failure", language)
+        # El proveedor nunca puede introducir marcadores internos en el checkpoint.
+        # Solo se conserva la señal de un fallback creado en el bloque de excepción.
+        if protected and not provider_failed:
+            if response.tool_calls:
+                if any(call["name"] not in VITA_TOOL_ALLOWLIST for call in response.tool_calls):
+                    response = fallback_message("engine_decision", language)
+                else:
+                    response = AIMessage(content="", tool_calls=response.tool_calls)
+            else:
+                candidate = extract_message_text(response.content)
+                reason = classify_output(candidate)
+                if reason:
+                    await adispatch_custom_event(
+                        SAFETY_EVENT, {"reason": reason, "fingerprint": fingerprint(candidate)}
+                    )
+                    response = fallback_message(reason, language)
+                else:
+                    response = AIMessage(
+                        content=candidate,
+                        id=response.id,
+                        usage_metadata=response.usage_metadata,
+                    )
         if (
             first_plan
+            and not safety_reason(response)
             and active_tools
             and (
                 not response.tool_calls
@@ -577,6 +652,14 @@ def make_agent_node(
                         "source": "vita_runtime",
                     }
                 )
+        if safety_reason(response):
+            return {
+                "messages": [response],
+                "app_actions": Overwrite([]),
+                "data_sources": Overwrite([]),
+                "suggestions": Overwrite([]),
+                "tools_used": Overwrite([]),
+            }
         return {
             # Guardrails ya persistió la entrada; no repetirla tras cada herramienta.
             "messages": [response],
@@ -778,6 +861,8 @@ def make_tools_node(
         if record_tools:
             selected = [tool for tool in selected if tool.name in record_tools]
         allowed = {tool.name for tool in selected}
+        if get_config().get("configurable", {}).get("vita_safety"):
+            allowed.intersection_update(VITA_TOOL_ALLOWLIST)
         # Solo se admiten los campos públicos del esquema. Los selectores de
         # paciente siguen excluidos de cualquier lectura.
         invalid_arguments = any(

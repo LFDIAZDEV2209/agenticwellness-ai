@@ -642,7 +642,7 @@ async def test_provider_error_has_safe_phase_diagnostics_without_private_message
         BrokenGraph(), "base", None, "fake", "fake", 25, "fixture"
     )
     response = await post(rig)
-    assert "voice_runtime_error" in response.text
+    assert "Inténtalo de nuevo" in response.text and "[DONE]" in response.text
     diagnostics = "\n".join(r.getMessage() for r in caplog.records)
     assert "phase=generate error_type=RuntimeError code=None" in diagnostics
     assert "PRIVATE_PROVIDER_PAYLOAD" not in response.text + diagnostics
@@ -652,7 +652,7 @@ async def test_provider_error_has_safe_phase_diagnostics_without_private_message
 async def test_http_asgi_cancellation_cancels_tool_and_marks_receipt_interrupted(rig):
     started, cancelled = asyncio.Event(), asyncio.Event()
 
-    @tool
+    @tool("get_current_time")
     async def slow() -> str:
         """Lectura lenta cancelable."""
         started.set()
@@ -662,7 +662,7 @@ async def test_http_asgi_cancellation_cancels_tool_and_marks_receipt_interrupted
             cancelled.set()
 
     rig.model.responses = [
-        AIMessage(content="", tool_calls=[{"name": "slow", "args": {}, "id": "slow"}])
+        AIMessage(content="", tool_calls=[{"name": "get_current_time", "args": {}, "id": "slow"}])
     ]
     rig.graph = build_graph(model=rig.model, tools=[slow], checkpointer=rig.graph.checkpointer)
     rig.resolver.side_effect = None
@@ -779,7 +779,7 @@ async def test_vita_session_emits_only_reduced_context_and_bound_thread(rig):
 async def test_revocation_during_http_asgi_generation_cancels_tool(rig, caplog):
     started, cancelled = asyncio.Event(), asyncio.Event()
 
-    @tool
+    @tool("get_current_time")
     async def slow() -> str:
         """Lectura aún en vuelo al revocar desde otra réplica."""
         started.set()
@@ -789,7 +789,7 @@ async def test_revocation_during_http_asgi_generation_cancels_tool(rig, caplog):
             cancelled.set()
 
     rig.model.responses = [
-        AIMessage(content="", tool_calls=[{"name": "slow", "args": {}, "id": "slow"}])
+        AIMessage(content="", tool_calls=[{"name": "get_current_time", "args": {}, "id": "slow"}])
     ]
     graph = build_graph(model=rig.model, tools=[slow], checkpointer=MemorySaver())
     rig.resolver.side_effect = None
@@ -837,7 +837,7 @@ class StreamingFinalModel(RecordingFakeModel):
 async def test_inflight_http_duplicate_waits_and_replays_without_another_llm(rig, outcome):
     entered, release = asyncio.Event(), asyncio.Event()
 
-    @tool
+    @tool("get_current_time")
     async def hold() -> str:
         """Lectura controlada para observar un duplicado durante ejecución."""
         entered.set()
@@ -845,7 +845,10 @@ async def test_inflight_http_duplicate_waits_and_replays_without_another_llm(rig
         return "fixture read"
 
     graph = build_graph(
-        model=rig.model, tools=[hold], prepare_tools=["hold"], checkpointer=rig.graph.checkpointer
+        model=rig.model,
+        tools=[hold],
+        prepare_tools=["get_current_time"],
+        checkpointer=rig.graph.checkpointer,
     )
     rig.resolver.side_effect = None
     rig.resolver.return_value = ResolvedTurn(graph, "base", None, "fake", "fake", 25, "fixture")
@@ -921,7 +924,7 @@ async def test_split_audio_supersedes_control_roundtrip_runner_with_same_counter
     entered, cancelled = asyncio.Event(), asyncio.Event()
     reads = 0
 
-    @tool
+    @tool("get_current_time")
     async def read_once() -> str:
         """La primera lectura se cancela; la sucesora continúa."""
         nonlocal reads
@@ -937,7 +940,7 @@ async def test_split_audio_supersedes_control_roundtrip_runner_with_same_counter
     graph = build_graph(
         model=rig.model,
         tools=[read_once],
-        prepare_tools=["read_once"],
+        prepare_tools=["get_current_time"],
         checkpointer=rig.graph.checkpointer,
     )
     rig.resolver.side_effect = None
@@ -1038,8 +1041,8 @@ async def test_changed_previous_prefix_is_rejected_with_safe_diagnostics(rig, ca
     assert "fixture" not in rejection and SECRET not in rejection
 
 
-async def test_http_asgi_streams_first_chunk_before_generation_completes(rig):
-    @tool
+async def test_http_asgi_withholds_audio_until_generation_completes(rig):
+    @tool("get_current_time")
     def internal_read() -> str:
         """Lectura interna preparada en código, nunca narrada al proveedor."""
         return "INTERNAL_TOOL_PLANNING"
@@ -1048,7 +1051,7 @@ async def test_http_asgi_streams_first_chunk_before_generation_completes(rig):
     graph = build_graph(
         model=model,
         tools=[internal_read],
-        prepare_tools=["internal_read"],
+        prepare_tools=["get_current_time"],
         checkpointer=rig.graph.checkpointer,
     )
     rig.resolver.side_effect = None
@@ -1096,13 +1099,14 @@ async def test_http_asgi_streams_first_chunk_before_generation_completes(rig):
     task = asyncio.create_task(rig.app(scope, receive, send))
     try:
         await asyncio.wait_for(model.waiting_for_release.wait(), 3)
-        await asyncio.wait_for(first_content.wait(), 3)
-        assert b"DETALLE_RECORTADO" not in b"".join(bodies)
+        assert not first_content.is_set()
+        assert b"Tu resultado" not in b"".join(bodies)
         assert rig.store.receipts[1].status == "running"
         assert not task.done()
     finally:
         model.release.set()
         await asyncio.wait_for(task, 3)
+    assert first_content.is_set()
     response = b"".join(bodies).decode()
     spoken = "".join(
         json.loads(line[6:])["choices"][0]["delta"].get("content", "")
