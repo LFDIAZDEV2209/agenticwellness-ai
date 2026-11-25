@@ -285,11 +285,14 @@ async def test_chat_stream_asgi_disconnect_releases_lock_before_return_without_g
 
     async def send(message):
         sent.append(message)
-        if message["type"] == "http.response.body" and b"event: message\n" in message["body"]:
-            assert b'"type": "token"' in message["body"]
+        chunk = message.get("body", b"")
+        # Vita retiene el texto hasta validar el turno. Desconectar al anunciar
+        # el inicio del agente conserva la prueba de limpieza con el lock activo.
+        if b"event: flow\n" in chunk and b'"node": "agent", "phase": "start"' in chunk:
+            assert all(b"event: message\n" not in frame.get("body", b"") for frame in sent)
             with pytest.raises(locking.ThreadBusyError):
                 async with locking.thread_guard("owner::thread"):
-                    pytest.fail("El token debe enviarse con exclusión del hilo")
+                    pytest.fail("El turno en curso debe conservar la exclusión del hilo")
             emitted.set()
             await sleep_forever()
 
@@ -652,7 +655,7 @@ async def test_http_native_admission_races_with_real_postgres(rig, mode, caplog)
     entered, release, cancelled, waiting = [asyncio.Event() for _ in range(4)]
     reads = 0
 
-    @tool
+    @tool("get_current_time")
     async def hold_first() -> str:
         """La primera lectura permite observar el cruce de callbacks HTTP."""
         nonlocal reads
@@ -666,7 +669,10 @@ async def test_http_native_admission_races_with_real_postgres(rig, mode, caplog)
         return "fixture read"
 
     graph = build_graph(
-        model=rig.model, tools=[hold_first], prepare_tools=["hold_first"], checkpointer=rig.saver
+        model=rig.model,
+        tools=[hold_first],
+        prepare_tools=["get_current_time"],
+        checkpointer=rig.saver,
     )
     resolver = AsyncMock(
         return_value=ResolvedTurn(
