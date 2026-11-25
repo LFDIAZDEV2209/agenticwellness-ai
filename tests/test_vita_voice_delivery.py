@@ -160,3 +160,35 @@ def test_english_metric_list_uses_and():
 def test_empty_answer_stays_empty():
     assert format_voice_answer("   ", language="es", has_results=True) == ""
     assert format_voice_answer("", language="en", has_results=False) == ""
+
+
+def test_brand_is_corrected_in_streamed_and_replayed_voice():
+    language = "es"
+    fragments = ["Soy Vita de Copp", "\u2013Ad", "resd/ANTARES. ", "Te puedo orientar."]
+    raw = "".join(fragments)
+    expected = "Soy Vita de Agentic Wellness IA. Te puedo orientar."
+    emitter = VoiceSentenceEmitter(language)
+    saved = format_voice_answer(raw, language=language, has_results=False)
+    assert saved == expected
+    streamed = "".join(emitter.feed(chunk) for chunk in fragments)
+    assert streamed + emitter.finish(saved, has_results=False) == expected
+    replay = VoiceSentenceEmitter(language).finish(raw, has_results=False, allow_standalone=True)
+    assert replay == expected
+
+
+def test_brand_correction_preserves_technical_identifiers():
+    raw = "El contacto es info@coppadresd.com. La aplicación se llama ANTARES."
+    expected = "El contacto es info@coppadresd.com. La aplicación se llama Agentic Wellness IA."
+    assert format_voice_answer(raw, language="es", has_results=False) == expected
+
+
+def test_brand_correction_leaves_urgent_guidance_first():
+    raw = "Llama a emergencias ahora. Tampoco esperes una respuesta de Copp Adresd."
+    expected = "Llama a emergencias ahora. Tampoco esperes una respuesta de Agentic Wellness IA."
+    spoken = format_voice_answer(raw, language="es", has_results=False, correct_product_name=True)
+    assert spoken == expected
+
+
+def test_brand_is_corrected_even_if_no_other_text_can_be_spoken():
+    spoken = format_voice_answer("", language="en", has_results=False, correct_product_name=True)
+    assert spoken == "The app is called Agentic Wellness IA."

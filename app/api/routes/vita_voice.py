@@ -29,6 +29,7 @@ from app.observability.turn_trace import (
 )
 from app.vita.client import VitaAccessError, read_catalog
 from app.vita.locking import ThreadBusyError
+from app.vita.routing import LEGACY_APPLICATION_NAME
 from app.vita.runtime import resolve_turn
 from app.voice.context import verify_context
 from app.voice.delivery import VoiceSentenceEmitter, voice_turn_has_results
@@ -377,6 +378,8 @@ async def completion(
         text_chars = 0
         state, completed = None, False
         emitter = VoiceSentenceEmitter(request.language)
+        # El resultado formateado antepone la corrección y preserva la prioridad de seguridad.
+        defer_product_correction = bool(LEGACY_APPLICATION_NAME.search(request.message))
         saw_text_chunk = False
         next_access_check = time.monotonic() + 1
         failure: str | None = None
@@ -407,7 +410,7 @@ async def completion(
                         break
                     if mode == "values":
                         state = chunk
-                    elif mode == "messages":
+                    elif mode == "messages" and not defer_product_correction:
                         message, metadata = chunk
                         if (
                             metadata.get("langgraph_node") == "answer"

@@ -143,6 +143,13 @@ async def test_capability_introductions_keep_the_actual_topic(text, catalog):
     ).agent is not None
 
 
+async def test_app_name_question_uses_service_routing(catalog):
+    decision = await select_agent("¿Cómo se llama la aplicación?", catalog, channel="voice")
+
+    assert decision.agent is None
+    assert decision.reason == "service_fast_path"
+
+
 async def test_structured_classification_only_for_ambiguity_and_bounded_to_catalog(catalog):
     classifier = AsyncMock(return_value="foreign")
     result = await select_agent("ansiedad y almuerzo", catalog, classifier=classifier)

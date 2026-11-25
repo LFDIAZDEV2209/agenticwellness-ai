@@ -52,7 +52,7 @@ from app.vita.context_builder import (
     build_context,
     estimate_tokens,
 )
-from app.vita.routing import service_query
+from app.vita.routing import LEGACY_APPLICATION_NAME, application_name_reply, service_query
 from app.voice.delivery import format_voice_answer, voice_turn_has_results
 
 logger = logging.getLogger(__name__)
@@ -514,7 +514,13 @@ def make_agent_node(
         prompt = context.prompt
         if attachment_block:
             prompt = _with_attachment_data(context, attachment_block)
-        response = await active_model.ainvoke(prompt)
+        utterance = state.get("input", "")
+        product_reply = application_name_reply(utterance, language) if voice else None
+        response = (
+            AIMessage(content=product_reply)
+            if product_reply is not None
+            else await active_model.ainvoke(prompt)
+        )
         if (
             first_plan
             and active_tools
@@ -546,6 +552,8 @@ def make_agent_node(
                             extract_message_text(response.content),
                             language=language,
                             has_results=voice_turn_has_results(state),
+                            correct_product_name=product_reply is None
+                            and bool(LEGACY_APPLICATION_NAME.search(utterance)),
                         )
                     }
                 )

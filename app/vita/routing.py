@@ -74,7 +74,54 @@ def _availability_query(text: str) -> bool:
     )
 
 
+APPLICATION_NAME = "Agentic Wellness IA"
+_LEGACY_APPLICATION_NAME = r"(?:copp[-\s\u2010-\u2015]*add?res+d|antares)"
+# Los límites distinguen la marca de dominios, direcciones y nombres técnicos.
+LEGACY_APPLICATION_NAME = re.compile(
+    rf"(?<![\w@./-]){_LEGACY_APPLICATION_NAME}"
+    rf"(?:\s*/\s*{_LEGACY_APPLICATION_NAME})*(?![\w@/-]|\.\w)",
+    re.IGNORECASE,
+)
+
+
+def application_name_statement(language: str | None) -> str:
+    if language == "en":
+        return f"The app is called {APPLICATION_NAME}."
+    return f"La aplicación se llama {APPLICATION_NAME}."
+
+
+def application_name_reply(text: str, language: str | None = None) -> str | None:
+    """Resuelve preguntas directas sobre el nombre del producto, en ES y EN."""
+    question = re.sub(r"\s+", " ", normalize(text)).strip("¿?¡! .,;").replace("\u2019", "'")
+    question = re.sub(r"^vita[ ,¿]+", "", question)
+    if LEGACY_APPLICATION_NAME.fullmatch(question):
+        return application_name_statement(language)
+    if re.fullmatch(
+        r"(?:como se llama (?:la|esta|tu) (?:app|aplicacion)|"
+        r"cual es el nombre de (?:la|esta|tu) (?:app|aplicacion)|"
+        r"(?:(?:la|esta) (?:app|aplicacion)|esto) (?:se llama|sigue siendo|es) "
+        rf"{_LEGACY_APPLICATION_NAME}|"
+        rf"estoy (?:en|usando) (?:la (?:app|aplicacion) de )?{_LEGACY_APPLICATION_NAME})"
+        r"(?:[, ]+por favor)?",
+        question,
+    ):
+        return application_name_statement("es")
+    if re.fullmatch(
+        r"(?:what(?: is|'s) (?:the name of (?:the|this|your) (?:app|application)|"
+        r"(?:the|this|your) (?:app|application) called)|"
+        r"is (?:this(?: (?:app|application))?|the (?:app|application)) (?:still )?(?:called )?"
+        rf"{_LEGACY_APPLICATION_NAME}|"
+        rf"am i (?:using|on) (?:the (?:app|application) from )?{_LEGACY_APPLICATION_NAME})"
+        r"(?:[, ]+please)?",
+        question,
+    ):
+        return application_name_statement("en")
+    return None
+
+
 def _service_query(text: str) -> bool:
+    if application_name_reply(text) is not None:
+        return True
     text = text.strip("¿?! .,;")
     arithmetic = re.sub(r"^(?:cuanto es|calcula|calculate|what is|how much is)\s+", "", text)
     arithmetic = re.sub(r"\s+(?:please|por favor)$", "", arithmetic)
