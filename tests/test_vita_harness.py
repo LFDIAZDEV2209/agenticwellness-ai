@@ -170,24 +170,22 @@ async def test_deadline_con_reintento_en_tool_idempotente(monkeypatch):
     attempts = {"n": 0}
 
     @tool
-    async def slow_read() -> str:
-        """Lectura lenta solo en el primer intento."""
+    async def retryable_read() -> str:
+        """Report a timeout on the first attempt."""
         attempts["n"] += 1
         if attempts["n"] == 1:
-            await asyncio.sleep(1)
+            raise TimeoutError("Synthetic first-attempt timeout")
         return '{"status":"ok"}'
 
-    monkeypatch.setitem(
-        TOOL_SPECS, "slow_read", ToolSpec("slow_read", deadline_seconds=0.05, retries=1)
-    )
+    monkeypatch.setitem(TOOL_SPECS, "retryable_read", ToolSpec("retryable_read", retries=1))
     model = FakeToolAwareModel(
         responses=[
-            AIMessage(content="", tool_calls=[_call("slow_read", "s1")]),
+            AIMessage(content="", tool_calls=[_call("retryable_read", "s1")]),
             AIMessage(content="Hecho."),
         ]
     )
     collector = TurnTraceCollector(thread_id="t", channel="text")
-    graph = build_graph(model=model, checkpointer=MemorySaver(), tools=[slow_read])
+    graph = build_graph(model=model, checkpointer=MemorySaver(), tools=[retryable_read])
     result = await graph.ainvoke(
         {"input": "lee", "messages": []}, config=attach_collector(_config("retry"), collector)
     )

@@ -46,9 +46,10 @@ from app.safety.vita_delivery import (
     SAFETY_EVENT,
     VITA_TOOL_ALLOWLIST,
     classify_output,
+    emergency_delivery_reason,
     fallback_message,
     fingerprint,
-    prohibited_input,
+    protected_input_reason,
     safety_reason,
 )
 from app.tools.catalog import conversion_failures, tool_label
@@ -71,6 +72,17 @@ logger = logging.getLogger(__name__)
 # enlazar sus tools: el canal (chat, voz, WhatsApp) recibe un texto seguro y
 # el backend puede distinguirlo de una respuesta normal sin parsear el texto.
 TOOL_CATALOG_ERROR_CODE = "tool_catalog_unavailable"
+
+
+def _latest_user_text(messages: list[BaseMessage]) -> str:
+    return next(
+        (
+            extract_message_text(message.content)
+            for message in reversed(messages)
+            if isinstance(message, HumanMessage)
+        ),
+        "",
+    )
 
 
 def guardrails_node(state: AgentState, *, record_topic: str | None = None) -> dict:
@@ -146,9 +158,14 @@ def guardrails_node(state: AgentState, *, record_topic: str | None = None) -> di
     if configurable.get("vita_history") is not None:
         turn_state.update(memory_context="", experience_context="")
 
-    if result.safe and configurable.get("vita_safety") and prohibited_input(visible_input):
+    safety_rejection = (
+        protected_input_reason(visible_input, _latest_user_text(prior_messages[:amended_at]))
+        if result.safe and configurable.get("vita_safety")
+        else None
+    )
+    if safety_rejection:
         fallback = fallback_message(
-            "clinical_topic",
+            safety_rejection,
             detect_turn_language({"input": visible_input}) or configurable.get("language"),
         )
         fallback.id = configurable.get("assistant_message_id")
@@ -157,7 +174,7 @@ def guardrails_node(state: AgentState, *, record_topic: str | None = None) -> di
             fallback.additional_kwargs["execution_id"] = configurable["execution_id"]
         return {
             **turn_state,
-            "guardrail": {"safe": False, "reason": "clinical_topic"},
+            "guardrail": {"safe": False, "reason": safety_rejection},
             "messages": turn_messages(
                 [
                     HumanMessage(
@@ -583,7 +600,10 @@ def make_agent_node(
                     response = AIMessage(content="", tool_calls=response.tool_calls)
             else:
                 candidate = extract_message_text(response.content)
-                reason = classify_output(candidate)
+                turn_start = state.get("turn_start_index", 0)
+                prior_input = _latest_user_text(list(state.get("messages", []))[:turn_start])
+                reason = emergency_delivery_reason(candidate, utterance, prior_input)
+                reason = reason or classify_output(candidate)
                 if reason:
                     await adispatch_custom_event(
                         SAFETY_EVENT, {"reason": reason, "fingerprint": fingerprint(candidate)}

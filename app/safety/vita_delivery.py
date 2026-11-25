@@ -10,7 +10,15 @@ from langchain_core.messages import AIMessage
 SAFETY_KEY = "vita_delivery_safety"
 SAFETY_EVENT = "vita_delivery_block"
 FALLBACK_REASONS = frozenset(
-    {"clinical_topic", "clinical_output", "engine_decision", "empty_answer", "provider_failure"}
+    {
+        "clinical_topic",
+        "clinical_output",
+        "emergency_local",
+        "emergency_us",
+        "engine_decision",
+        "empty_answer",
+        "provider_failure",
+    }
 )
 
 # Temas de exclusión explícita. No se excluyen palabras aisladas como «salud»,
@@ -22,6 +30,49 @@ CLINICAL_TOPICS = re.compile(
     r"shortness of breath|dificultad para respirar|difficulty breathing|"
     r"que (?:medicamento|pastilla|medicina|farmaco) (?:debo |puedo )?(?:tom\w+|us\w+)|"
     r"(?:what|which) (?:drug|medicine|medication|pill) (?:should|can|do) i (?:take|use))\b"
+)
+_EMERGENCY_SYMPTOM = re.compile(
+    r"\b(?:dolor (?:en (?:el )?|de )pecho|dolor toracico|chest pain|"
+    r"falta de aire|dificultad para respirar|"
+    r"(?:difficulty|trouble) breathing|shortness of breath)\b"
+)
+_IMMEDIATE_DANGER = re.compile(
+    r"\b(?:ahora|en este momento|grave|muy fuerte|intens[oa]|no puede respirar|"
+    r"right now|at the moment|severe|very bad|can't breathe|cannot breathe)\b"
+)
+_UNRESPONSIVE_PERSON = re.compile(
+    r"\b(?:persona|alguien|companero|companera|nino|nina|hijo|hija)"
+    r"\b[^.!?\n]{0,40}\b(?:no responde|perdio el conocimiento|esta inconsciente)\b|"
+    r"\b(?:person|someone|partner|companion|child)"
+    r"\b[^.!?\n]{0,40}\b(?:is unresponsive|is not responding|lost consciousness)\b"
+)
+_BREATHING_DISTRESS = re.compile(
+    r"\b(?:no pued[eo] respirar|apenas pued[eo] respirar|"
+    r"(?:cada vez )?(?:me|le) cuesta mas respirar|"
+    r"can(?:not|'t) breathe|can barely breathe|harder and harder to breathe)\b"
+)
+_IMMEDIATE_SELF_HARM = re.compile(
+    r"\b(?:i(?: am|'m) about to hurt myself|"
+    r"(?:voy a|estoy a punto de) hacerme dano)\b"
+)
+_CURRENT_US_LOCATION = re.compile(
+    r"\b(?:estoy en|estamos en|i am in|i'm in|we are in|we're in|currently in) "
+    r"(?:(?:los )?estados unidos|ee\.?\s*uu\.?|"
+    r"(?:the )?united states|(?:the )?u\.?s\.?(?:a\.?)?)\b"
+)
+_LOCATION_UPDATE = re.compile(
+    r"\b(?:estoy (?:en (?!peligro\b)|de viaje)|estamos (?:en (?!peligro\b)|de viaje)|"
+    r"i am (?:in (?!immediate danger\b)|travell?ing)|"
+    r"i'm (?:in (?!immediate danger\b)|travell?ing)|"
+    r"(?:don't|do not) know where i am|no sabes donde estoy|"
+    r"my (?:country|location)|mi (?:pais|ubicacion))\b"
+)
+_EMERGENCY_DIRECTION = re.compile(
+    r"^[^\w]*(?:please |por favor[, ]+)?"
+    r"(?:(?:have|ask|tell) (?:them|your friend|the person) (?:to )?)?"
+    r"(?:call|contact|dial|llama|llame|contacta|contacte|marca|marque)\b"
+    r"[^.!?]{0,90}\b(?:911|emergency (?:services|number)|servicios (?:locales )?de emergencias?|"
+    r"emergencias(?: locales)?|sos)\b"
 )
 _MEDICINE = re.compile(
     r"\b(?:medicamentos?|medications?|medicinas?|medicine|drug|farmacos?|"
@@ -87,7 +138,11 @@ VITA_TOOL_ALLOWLIST = frozenset(
     }
 )
 GENERATION_POLICY = (
-    "Vita safety: provide only non-clinical wellness support. Never provide a diagnosis, "
+    "Vita safety: if the person reports immediate danger or a potential emergency, "
+    "start with the instruction to contact emergency services now. Use 911 only when "
+    "the person is in the United States; otherwise direct them to local emergency services. "
+    "Keep the emergency reply to one or two short sentences with no other advice. "
+    "Provide only non-clinical wellness support. Never provide a diagnosis, "
     "dose, treatment or clinical recommendation, even from context or a document. "
     "Never assign calories, prescribe exercises or decide a change to the engine plan. "
     "You may help users find their existing plan without choosing any of its values."
@@ -103,15 +158,37 @@ def _normalize(text: str) -> str:
     return " ".join(clean.split())
 
 
-def prohibited_input(text: str) -> bool:
+def _emergency_reason(text: str, previous_text: str) -> str:
+    if _CURRENT_US_LOCATION.search(text) or (
+        not _LOCATION_UPDATE.search(text) and _CURRENT_US_LOCATION.search(_normalize(previous_text))
+    ):
+        return "emergency_us"
+    return "emergency_local"
+
+
+def protected_input_reason(text: str, previous_text: str = "") -> str | None:
     normalized = _normalize(text)
-    return bool(
-        CLINICAL_TOPICS.search(normalized)
-        or (
-            _MEDICINE.search(normalized)
-            and (_DOSE.search(normalized) or _MEDICATION_SCHEDULE.search(normalized))
-        )
-    )
+    if (
+        _UNRESPONSIVE_PERSON.search(normalized)
+        or _BREATHING_DISTRESS.search(normalized)
+        or _IMMEDIATE_SELF_HARM.search(normalized)
+        or (_EMERGENCY_SYMPTOM.search(normalized) and _IMMEDIATE_DANGER.search(normalized))
+    ):
+        return _emergency_reason(normalized, previous_text)
+    if CLINICAL_TOPICS.search(normalized) or (
+        _MEDICINE.search(normalized)
+        and (_DOSE.search(normalized) or _MEDICATION_SCHEDULE.search(normalized))
+    ):
+        return "clinical_topic"
+    return None
+
+
+def emergency_delivery_reason(answer: str, user_text: str, previous_text: str) -> str | None:
+    # Solo una instrucción explícita al principio. La ubicación proviene del paciente,
+    # nunca de un número o un país sugeridos por el modelo.
+    if _EMERGENCY_DIRECTION.search(_normalize(answer)):
+        return _emergency_reason(_normalize(user_text), previous_text)
+    return None
 
 
 def classify_output(text: str) -> str | None:
@@ -139,6 +216,18 @@ def classify_output(text: str) -> str | None:
 
 
 def fallback_text(reason: str, language: str | None) -> str:
+    if reason == "emergency_us":
+        return (
+            "Call 911 now. Contact emergency services."
+            if language == "en"
+            else "Llama al 911 ahora. Contacta a los servicios de emergencia."
+        )
+    if reason == "emergency_local":
+        return (
+            "Contact local emergency services now."
+            if language == "en"
+            else "Contacta a los servicios locales de emergencia ahora."
+        )
     if reason in {"provider_failure", "empty_answer"}:
         return (
             "Vita couldn't complete this request. Please try again."
