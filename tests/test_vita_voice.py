@@ -324,7 +324,9 @@ LANGUAGE_TOOLS = [{"type": "function", "function": {"name": "language_detection"
             "La aplicación se llama Agentic Wellness IA.",
         ),
         ("es", "¿Estoy usando ANTARES?", "La aplicación se llama Agentic Wellness IA."),
+        ("es", "CoppAdressd", "La aplicación se llama Agentic Wellness IA."),
         ("en", "What's this app called?", "The app is called Agentic Wellness IA."),
+        ("en", "ANTARES?", "The app is called Agentic Wellness IA."),
         ("en", "Is this app still called COPP ADRESD?", "The app is called Agentic Wellness IA."),
         ("en", "Is this ANTARES?", "The app is called Agentic Wellness IA."),
     ],
@@ -343,6 +345,22 @@ async def test_voice_returns_official_application_name(rig, language, utterance,
     ]
     assert "".join(delta.get("content", "") for delta in deltas) == answer
     assert not rig.model.prompts
+
+
+async def test_voice_corrects_legacy_name_before_answering_the_question(rig):
+    rig.model.responses = [AIMessage(content="Puedes abrir tu plan desde Inicio.")]
+    response = await post(rig, body("En Copp Adresd, ¿dónde veo mi plan?"))
+
+    assert response.status_code == 200
+    deltas = [
+        json.loads(line.removeprefix("data: "))["choices"][0]["delta"]
+        for line in response.text.splitlines()
+        if line.startswith("data: {")
+    ]
+    assert "".join(delta.get("content", "") for delta in deltas) == (
+        "La aplicación se llama Agentic Wellness IA. Puedes abrir tu plan desde Inicio."
+    )
+    assert rig.model.prompts
 
 
 async def test_initial_sdk_language_does_not_trigger_redundant_preset_reset(rig):

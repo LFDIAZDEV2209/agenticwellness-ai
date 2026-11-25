@@ -18,7 +18,12 @@ import re
 
 from langchain_core.messages import ToolMessage
 
-from app.vita.routing import normalize
+from app.vita.routing import (
+    APPLICATION_NAME,
+    LEGACY_APPLICATION_NAME,
+    application_name_statement,
+    normalize,
+)
 
 _BULLET = re.compile(r"^\s*(?:[-+*•]|\d+[.)])\s+(.*)$")
 _HEADING = re.compile(r"^\s*(?:#{1,6}\s|[-*_]{3,}\s*$)")
@@ -145,7 +150,7 @@ def _month_en(abbr: str) -> str:
 
 def _humanize(text: str, language: str) -> str:
     """Fechas, horas y números como los diría una persona."""
-    clean = text
+    clean = LEGACY_APPLICATION_NAME.sub(APPLICATION_NAME, text)
     # La hora entre paréntesis es metadato del expediente: no se dice.
     clean = re.sub(r"\s*\(\d{1,2}:\d{2}\)", "", clean)
     # «54.17 (alto)» → «54.17, alto»: paréntesis cortos se leen como aclaración.
@@ -333,26 +338,33 @@ def _first_clause(sentence: str, limit: int) -> str:
     return " ".join(words[:limit]).rstrip(" ,;:") + "."
 
 
-def format_voice_answer(text: str, *, language: str | None, has_results: bool) -> str:
+def format_voice_answer(
+    text: str, *, language: str | None, has_results: bool, correct_product_name: bool = False
+) -> str:
     """Devuelve el texto que se habla y se guarda en el hilo."""
-    if not text or not text.strip():
-        return ""
     lang = "en" if language == "en" else "es"
+    statement = application_name_statement(lang) if correct_product_name else ""
+    if not text or not text.strip():
+        return statement
     sentences, results = _spoken_script(text, lang, has_results)
     if not sentences:
-        return ""
+        return statement
     urgent = bool(_SAFETY.search(normalize(text)))
     if urgent:
         return " ".join(sentences)
-    limit = _RESULT_WORD_LIMIT if results else _GENERAL_WORD_LIMIT
+    correction = statement if sentences[0] != statement else ""
+    limit = (_RESULT_WORD_LIMIT if results else _GENERAL_WORD_LIMIT) - len(correction.split())
     spoken = _bounded_prefix(sentences, limit)
-    if not spoken:
-        return _first_clause(sentences[0], limit)
-    trimmed = [_trim_metric_list(sentence, lang) for sentence in spoken]
-    # Una oferta de «más detalles por chat» no se dice en voz: el paciente ya
-    # está conversando y el detalle llega en el siguiente turno.
-    kept = [sentence for sentence in trimmed if not _CHAT_OFFER.search(sentence.strip())]
-    return " ".join(kept or trimmed[:1])
+    if spoken:
+        if correction:
+            spoken = spoken[: _SENTENCE_LIMIT - 1]
+        trimmed = [_trim_metric_list(sentence, lang) for sentence in spoken]
+        # El detalle llega en el siguiente turno de voz, no por otro canal.
+        kept = [sentence for sentence in trimmed if not _CHAT_OFFER.search(sentence.strip())]
+        answer = " ".join(kept or trimmed[:1])
+    else:
+        answer = _first_clause(sentences[0], limit)
+    return f"{correction} {answer}" if correction else answer
 
 
 class VoiceSentenceEmitter:
@@ -396,7 +408,7 @@ class VoiceSentenceEmitter:
         return self._new_text(" ".join(prefix))
 
     def finish(self, saved: str, *, has_results: bool, allow_standalone: bool = False) -> str:
-        text = saved.strip()
+        text = LEGACY_APPLICATION_NAME.sub(APPLICATION_NAME, saved).strip()
         if not text:
             return ""
         if not self._emitted:

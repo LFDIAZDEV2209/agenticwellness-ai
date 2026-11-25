@@ -74,13 +74,28 @@ def _availability_query(text: str) -> bool:
     )
 
 
+APPLICATION_NAME = "Agentic Wellness IA"
 _LEGACY_APPLICATION_NAME = r"(?:copp[-\s\u2010-\u2015]*add?res+d|antares)"
+# Los límites distinguen la marca de dominios, direcciones y nombres técnicos.
+LEGACY_APPLICATION_NAME = re.compile(
+    rf"(?<![\w@./-]){_LEGACY_APPLICATION_NAME}"
+    rf"(?:\s*/\s*{_LEGACY_APPLICATION_NAME})*(?![\w@/-]|\.\w)",
+    re.IGNORECASE,
+)
 
 
-def application_name_reply(text: str) -> str | None:
+def application_name_statement(language: str | None) -> str:
+    if language == "en":
+        return f"The app is called {APPLICATION_NAME}."
+    return f"La aplicación se llama {APPLICATION_NAME}."
+
+
+def application_name_reply(text: str, language: str | None = None) -> str | None:
     """Resuelve preguntas directas sobre el nombre del producto, en ES y EN."""
     question = re.sub(r"\s+", " ", normalize(text)).strip("¿?¡! .,;").replace("\u2019", "'")
     question = re.sub(r"^vita[ ,¿]+", "", question)
+    if LEGACY_APPLICATION_NAME.fullmatch(question):
+        return application_name_statement(language)
     if re.fullmatch(
         r"(?:como se llama (?:la|esta|tu) (?:app|aplicacion)|"
         r"cual es el nombre de (?:la|esta|tu) (?:app|aplicacion)|"
@@ -90,7 +105,7 @@ def application_name_reply(text: str) -> str | None:
         r"(?:[, ]+por favor)?",
         question,
     ):
-        return "La aplicación se llama Agentic Wellness IA."
+        return application_name_statement("es")
     if re.fullmatch(
         r"(?:what(?: is|'s) (?:the name of (?:the|this|your) (?:app|application)|"
         r"(?:the|this|your) (?:app|application) called)|"
@@ -100,7 +115,7 @@ def application_name_reply(text: str) -> str | None:
         r"(?:[, ]+please)?",
         question,
     ):
-        return "The app is called Agentic Wellness IA."
+        return application_name_statement("en")
     return None
 
 
