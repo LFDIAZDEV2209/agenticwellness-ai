@@ -100,8 +100,11 @@ ES/EN y selecciona una versión inmutable publicada. La configuración requerida
   de las definiciones completas de herramientas de citas, por defecto `{}`.
 
 Antes de emitir cada credencial, el servicio lee la **misma versión exacta** con
-GET, comprueba agente/version_id, prompt canónico exacto de
-`build_patient_voice_prompt(language)`, idioma y saludo de `VOICE_FIRST_MESSAGES`.
+GET, comprueba agente/version_id, idioma y el par exacto de prompt y saludo de
+`patient_voice_identities(language)`. El par actualizado usa Agentic Wellness IA.
+Durante la actualización de la versión fijada, el par publicado anterior sigue
+siendo válido en su totalidad. Publicar y fijar una versión con la marca nueva
+requiere la aprobación habitual del proveedor y de la configuración.
 También exige autenticación y rechaza overrides del cliente, presets de idioma,
 KB/RAG, MCP nativo, herramientas inline/de servidor, procedimientos, workflows o
 webhooks de inicio que sustituyan instrucciones. No se acepta un GET de versión

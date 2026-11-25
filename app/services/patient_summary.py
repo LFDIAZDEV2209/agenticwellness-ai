@@ -104,7 +104,7 @@ async def generate_patient_summary(
         return deterministic_summary(payload)
     allowed = {fact.ref for fact in payload.facts}
     system = (
-        "Eres un asistente clínico de COPP-ADRESD. Redacta un resumen breve "
+        "Eres un asistente clínico de Agentic Wellness IA. Redacta un resumen breve "
         f"(máximo 900 caracteres) en {'español' if payload.language == 'es' else 'inglés'} "
         "usando SOLO los hechos entregados. Cada afirmación debe citar la referencia "
         "del hecho entre corchetes, por ejemplo [program.current]. source_refs debe "

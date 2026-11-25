@@ -8,7 +8,11 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from app.agents.prompts import VOICE_FIRST_MESSAGES, build_patient_voice_prompt
+from app.agents.prompts import (
+    VOICE_FIRST_MESSAGES,
+    build_patient_voice_prompt,
+    patient_voice_identities,
+)
 from app.api.main import create_app
 from app.core.config import get_settings
 from app.voice import client as voice_client
@@ -68,6 +72,23 @@ def _post(language="es", headers=HEADERS):
 def test_requires_internal_key(monkeypatch):
     _transport(monkeypatch, lambda _: pytest.fail("must not contact provider"))
     assert _post(headers={}).status_code == 401
+
+
+@pytest.mark.parametrize("language", ["es", "en"])
+def test_accepts_a_complete_legacy_brand_pair(language):
+    payload = _configuration(language)
+    agent = payload["conversation_config"]["agent"]
+    old_prompt, old_greeting = patient_voice_identities(language)[1]
+    agent["prompt"]["prompt"] = old_prompt
+    agent["first_message"] = old_greeting
+
+    assert voice_client._validate_patient_version(
+        payload, "agent_test", VERSIONS[language], language
+    ) == []
+
+    agent["first_message"] = VOICE_FIRST_MESSAGES[language]
+    with pytest.raises(voice_client.VoiceSessionError):
+        voice_client._validate_patient_version(payload, "agent_test", VERSIONS[language], language)
 
 
 def test_provider_url_only_response_starts_linked_legacy_session(monkeypatch):

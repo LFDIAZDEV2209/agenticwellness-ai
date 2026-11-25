@@ -34,7 +34,7 @@ class AgentRuntimeConfig(BaseModel):
       omiten se usa la configuración global del servicio.
     """
 
-    system_prompt: str = "Eres un asistente útil de CoppAddresd."
+    system_prompt: str = "Eres un asistente útil de Agentic Wellness IA."
     prompt: str | None = None
     provider: str | None = None
     model: str | None = None

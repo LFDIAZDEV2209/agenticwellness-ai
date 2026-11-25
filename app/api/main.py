@@ -73,7 +73,7 @@ def create_app() -> FastAPI:
     settings = get_settings()
     app = FastAPI(
         title=settings.app_name,
-        description="Agente IA de CoppAddresd — LangGraph + FastAPI (multi-proveedor).",
+        description="Servicio de asistentes de Agentic Wellness IA con LangGraph y FastAPI.",
         version="0.1.0",
         lifespan=lifespan,
     )

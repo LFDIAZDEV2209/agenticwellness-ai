@@ -15,7 +15,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 
 import httpx
 
-from app.agents.prompts import VOICE_FIRST_MESSAGES, build_patient_voice_prompt
+from app.agents.prompts import patient_voice_identities
 from app.core.config import Settings
 
 logger = logging.getLogger(__name__)
@@ -189,9 +189,9 @@ def _validate_patient_version(
         prompt = agent.get("prompt")
         valid = (
             isinstance(prompt, dict)
-            and prompt.get("prompt") == build_patient_voice_prompt(language)
+            and (prompt.get("prompt"), agent.get("first_message"))
+            in patient_voice_identities(language)
             and agent.get("language") == language
-            and agent.get("first_message") == VOICE_FIRST_MESSAGES[language]
             and not configuration.get("language_presets")
             and not payload.get("procedures")
             and not prompt.get("native_mcp_server_ids")
