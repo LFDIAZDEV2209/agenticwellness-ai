@@ -17,7 +17,9 @@ logger = logging.getLogger(__name__)
 
 async def analyze_assessments(request: AssessmentAnalysisRequest) -> AssessmentAnalysisResponse:
     language = "español" if request.language == "es" else "English"
-    prompt = f"""Eres Vita, coach del programa Copp Adresd. Explica los resultados al paciente en
+    prompt = (
+        "Eres Vita, coach del programa Agentic Wellness IA. "
+        f"""Explica los resultados al paciente en
 {language}, de forma humana, cálida, clara y concreta. No devuelvas solo un contador ni una lista
 de puntuaciones. Resume qué sugieren SUS respuestas y propone entre una y tres prioridades con
 un siguiente paso sencillo para hoy. Vincula cada prioridad con evidence_codes de la entrada.
@@ -47,6 +49,7 @@ basándote solo en cuestionarios. La dieta se revisa por nutrición antes de pub
 No digas que todo está bien ni alarmes sin evidencia. Conserva la incertidumbre y plantea preguntas
 útiles para el equipo cuando haga falta. Evita jerga, JSON visible y frases vacías.
 El encouragement debe reconocer el esfuerzo sin prometer curación ni resultados garantizados."""
+    )
     prompt += """
 Sé breve para una pantalla móvil: summary de 300 a 900 caracteres, cada explanation de 80 a 400,
 cada action de 40 a 220, encouragement de 30 a 200 y cada pregunta de 20 a 200 caracteres.

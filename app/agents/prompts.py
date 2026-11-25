@@ -5,7 +5,7 @@ PATIENT_SCOPE_VERSION = "vita-patient-education-v1"
 # No se sincroniza desde ERP. Se coloca en el rol system por cada invocación;
 # perfiles editables, recuerdos y documentos se suministran como datos de menor prioridad.
 PATIENT_SCOPE_POLICY = """VITA PATIENT SCOPE — vita-patient-education-v1
-You are Vita, Copp Adresd's AI assistant for general health education and help following
+You are Vita, the Agentic Wellness IA assistant for general health education and help following
 plans already approved by the patient's healthcare team. You are not the patient's
 clinician and do not independently provide medical assessment or treatment.
 
@@ -80,7 +80,7 @@ An earlier contradictory
 answer must be corrected rather than repeated as permission to exceed this scope.
 """
 
-BASE_SYSTEM_PROMPT = """Eres Vita, asistente de Copp Adresd.
+BASE_SYSTEM_PROMPT = """Eres Vita, asistente de Agentic Wellness IA.
 Ayuda con educación general en salud, hábitos cotidianos y seguimiento de planes ya
 aprobados por el equipo. No eres un profesional clínico. Usa el idioma indicado por
 la app o el del usuario. Sé clara, cálida y breve, y no inventes datos ni fuentes.
@@ -127,7 +127,7 @@ def _build_whatsapp_scope_policy() -> str:
     """Variante del alcance para el canal WhatsApp.
 
     Difiere del alcance de la app en dos puntos: NO se ofrece agendar (la
-    gestión y las citas con los profesionales viven en la app ANTARES) y el
+    gestión y las citas con los profesionales viven en la app Agentic Wellness IA) y el
     cierre lo dice explícitamente. La sustitución es literal sobre el alcance
     canónico; los tests fijan ambas frases para detectar derivas del texto.
     """
@@ -155,7 +155,7 @@ WHATSAPP_DATA_POLICY = """DATOS DEL PACIENTE (WhatsApp):
 """
 
 WHATSAPP_SYSTEM_PROMPT = (
-    """Eres Vita, asistente de Copp Adresd, atendiendo por WhatsApp.
+    """Eres Vita, asistente de Agentic Wellness IA, atendiendo por WhatsApp.
 Ayuda con educación general en salud, hábitos cotidianos y seguimiento de planes ya
 aprobados por el equipo. No eres un profesional clínico. Usa el idioma indicado por
 la app o el del usuario. Sé clara, cálida y breve, y no inventes datos ni fuentes.
@@ -199,9 +199,9 @@ PSYCHOLOGY_SYSTEM_PROMPT = _specialized_prompt(
 
 
 VOICE_FIRST_MESSAGES = {
-    "es": "Hola, soy Vita, tu asistente de Copp Adresd. Puedo ayudarte a entender "
+    "es": "Hola, soy Vita, tu asistente de Agentic Wellness IA. Puedo ayudarte a entender "
     "información general de salud y seguir el plan de tu equipo. ¿En qué te ayudo?",
-    "en": "Hi, I'm Vita, your Copp Adresd assistant. I can help you understand general "
+    "en": "Hi, I'm Vita, your Agentic Wellness IA assistant. I can help you understand general "
     "health information and follow your care team's plan. How can I help?",
 }
 
@@ -300,6 +300,20 @@ def build_patient_voice_prompt(language: str) -> str:
             build_language_instruction(language),
             _PINNED_VOICE_DELIVERY_POLICY,
         ]
+    )
+
+
+def patient_voice_identities(language: str) -> tuple[tuple[str, str], tuple[str, str]]:
+    """Pares exactos de prompt y saludo para las versiones de voz soportadas."""
+    prompt = build_patient_voice_prompt(language)
+    greeting = VOICE_FIRST_MESSAGES[language]
+    # Las versiones publicadas con la marca anterior conservan el mismo alcance.
+    return (
+        (prompt, greeting),
+        (
+            prompt.replace("the Agentic Wellness IA assistant", "Copp Adresd's AI assistant", 1),
+            greeting.replace("Agentic Wellness IA", "Copp Adresd", 1),
+        ),
     )
 
 

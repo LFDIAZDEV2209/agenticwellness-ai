@@ -71,7 +71,7 @@ def make_session_with_row(config: dict, knowledge_bases: list[dict] | None = Non
 
 def test_runtime_config_defaults():
     config = AgentRuntimeConfig.model_validate({})
-    assert config.system_prompt == "Eres un asistente útil de CoppAddresd."
+    assert config.system_prompt == "Eres un asistente útil de Agentic Wellness IA."
     assert config.tools == []
     assert config.retrieval_config.enabled is False
     assert config.recursion_limit == 25

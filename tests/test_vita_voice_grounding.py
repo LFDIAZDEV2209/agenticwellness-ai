@@ -13,7 +13,7 @@ from langchain_core.tools import tool
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import Overwrite
 
-from app.agents.prompts import VOICE_DELIVERY_POLICY, build_patient_voice_prompt
+from app.agents.prompts import VOICE_DELIVERY_POLICY, patient_voice_identities
 from app.core.config import get_settings
 from app.graph.graph import build_graph
 from app.vita import runtime
@@ -352,11 +352,27 @@ def test_voice_general_budget_and_decimal_unit_are_respected():
 
 
 @pytest.mark.parametrize(
-    "language,digest",
+    "language,expected_digests",
     [
-        ("es", "3ce472b6d2b006d0d444eea8fcfc82d3275da33b2b8bd72edecb7b761f3bd03f"),
-        ("en", "ebf2478174ae4bd5d9801b884fa4a9345e7af36886558278ff639a2435f0fc12"),
+        (
+            "es",
+            [
+                "4ccad2f899affb69f095bcd081a94eee9cfac46d683fc83bf65befcf4a243558",
+                "3ce472b6d2b006d0d444eea8fcfc82d3275da33b2b8bd72edecb7b761f3bd03f",
+            ],
+        ),
+        (
+            "en",
+            [
+                "839232b927bfc3533ad397378d5ca233614dfd4352e18762963ce284b94bc2bd",
+                "ebf2478174ae4bd5d9801b884fa4a9345e7af36886558278ff639a2435f0fc12",
+            ],
+        ),
     ],
 )
-def test_custom_llm_policy_does_not_change_pinned_elevenlabs_prompt(language, digest):
-    assert hashlib.sha256(build_patient_voice_prompt(language).encode()).hexdigest() == digest
+def test_custom_llm_policy_does_not_change_pinned_elevenlabs_prompt(language, expected_digests):
+    digests = [
+        hashlib.sha256(prompt.encode()).hexdigest()
+        for prompt, _ in patient_voice_identities(language)
+    ]
+    assert digests == expected_digests
