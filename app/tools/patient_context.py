@@ -9,7 +9,7 @@ from langgraph.config import get_config
 
 from app.core.config import get_settings
 
-NO_PATIENT_DATA = "Sin datos disponibles del paciente en este momento."
+NO_PATIENT_DATA = "No hay datos disponibles de tu perfil en este momento."
 
 
 @tool
