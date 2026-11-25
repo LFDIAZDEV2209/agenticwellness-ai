@@ -117,7 +117,7 @@ class PgVectorRetriever:
         for item in results:
             reference = item.reference()
             date_label = "fecha de indexación" if reference["date_kind"] == "indexed" else "fecha"
-            origin = "documento del paciente" if reference["origin"] == "patient" else "programa"
+            origin = "documento personal" if reference["origin"] == "patient" else "programa"
             header = (
                 f"[Fuente: {reference['title']} — Origen: {origin} — "
                 f"{date_label}: {reference['date'] or 'no consta'} — "

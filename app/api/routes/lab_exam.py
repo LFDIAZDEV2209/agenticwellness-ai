@@ -159,7 +159,7 @@ _KNOWN_UNITS = frozenset(
 )
 _SOURCE_LABELS = {
     "device": ("dispositivo", "device"),
-    "patient": ("registro del paciente", "patient record"),
+    "patient": ("registro personal", "personal record"),
     "professional": ("registro profesional", "professional record"),
     "lab": ("extracción de laboratorio histórica", "historical laboratory extraction"),
 }

@@ -258,7 +258,7 @@ async def extract_attachment(
         return ExtractedAttachment(attachment_id, row.kind, "unavailable", "none")
 
 
-_KIND_LABEL = {"image": "imagen enviada por el paciente", "pdf": "PDF enviado por el paciente"}
+_KIND_LABEL = {"image": "imagen adjunta", "pdf": "PDF adjunto"}
 _STATUS_NOTE = {
     "unreadable": "No se pudo leer contenido legible en este archivo.",
     "unavailable": "No fue posible procesar este archivo en este momento.",

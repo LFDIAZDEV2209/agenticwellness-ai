@@ -61,11 +61,11 @@ def test_factual_numbers_dates_units_and_neutral_origin(client, language):
     assert "2026-09-10" in text and "2026-07-01" in text
     if language == "en":
         assert "numerical increase" in text
-        assert "professional record" in text and "patient record" in text
+        assert "professional record" in text and "personal record" in text
         assert "does not establish improvement or worsening" in text
     else:
         assert "aumento numérico" in text
-        assert "registro profesional" in text and "registro del paciente" in text
+        assert "registro profesional" in text and "registro personal" in text
         assert "no establece mejoría ni empeoramiento" in text
 
 
