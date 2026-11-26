@@ -153,7 +153,7 @@ jobs:
               {"name": "VITA_RUNTIME_ENABLED", "value": "true"},
               {"name": "VITA_TRANSCRIPT_SYNC_ENABLED", "value": "true"},
               {"name": "VITA_ELEVENLABS_AGENT_ID", "value": "agent_5501m7dgvbpff26b1nk5s73qx4kf"},
-              {"name": "VITA_ELEVENLABS_VERSION_ID", "value": "agtvrsn_3501m7tfq4zefm4bha2npxc5xjfz"},
+              {"name": "VITA_ELEVENLABS_VERSION_ID", "value": "agtvrsn_8901m8cb86c2ebpbk826xcgc9cgn"},
               {"name": "VITA_VOICE_ENABLED", "value": "true"},
               {"name": "VITA_VOICE_TRANSPORT_VERIFIED", "value": "true"}
             ]) |
