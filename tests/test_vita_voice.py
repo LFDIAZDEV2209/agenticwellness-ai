@@ -35,6 +35,15 @@ from app.voice.context import AUDIENCE, sign_context, verify_context
 from app.voice.store import TurnAdmission, VoiceContextError
 from tests.fakes import RecordingFakeModel
 from tests.test_api import FakeDbSession
+from tests.vita_safety_cases import (
+    HIDDEN_MARKER,
+    PRIOR_ANSWER,
+    SAFETY_CASES,
+    ChunkedSafetyModel,
+    assert_context_delivery,
+    assert_safe_delivery,
+    sse_payloads,
+)
 
 SECRET, SERVICE_KEY = "context-fixture-" * 3, "service-fixture-" * 3
 SESSION_ID = "11111111-1111-1111-1111-111111111111"
@@ -1120,3 +1129,52 @@ async def test_http_asgi_withholds_audio_until_generation_completes(rig):
     assert "INTERNAL_TOOL_PLANNING" not in response and "SECRET_REASONING" not in response
     assert len(model.prompts) == 1  # Sin generación de planificación ni reescritor.
     assert rig.store.receipts[1].status == "completed"
+
+
+def set_safety_voice_model(rig, model):
+    graph = build_graph(
+        model=model,
+        checkpointer=rig.graph.checkpointer,
+        tools=[],
+        prepare_tools=[],
+    )
+    rig.resolver.side_effect = None
+    rig.resolver.return_value = ResolvedTurn(
+        graph, "base", None, "fixture", "fixture", 25, "fixture"
+    )
+    return graph
+
+
+def voice_fragments(response):
+    assert response.status_code == 200
+    assert response.text.endswith("data: [DONE]\n\n")
+    assert HIDDEN_MARKER not in response.text
+    frames = sse_payloads(response.text)
+    assert not any("error" in frame for frame in frames)
+    return [
+        frame["choices"][0]["delta"]["content"]
+        for frame in frames
+        if frame["choices"][0]["delta"].get("content")
+    ]
+
+
+@pytest.mark.parametrize("case", SAFETY_CASES)
+async def test_vita_safety_voice_matrix(rig, case):
+    rig.store.record.language = case.language
+    model = ChunkedSafetyModel(responses=[AIMessage(content=PRIOR_ANSWER[case.language])])
+    graph = set_safety_voice_model(rig, model)
+    if case.previous:
+        first = await post(rig, body(case.previous))
+        assert_context_delivery(model, case, voice_fragments(first))
+        payload = body(case.previous, case.prompt)
+        headers = {**rig.headers, "X-Vita-Turn": "2"}
+    else:
+        payload = body(case.prompt)
+        headers = rig.headers
+
+    prior_calls = len(model.prompts)
+    model.responses = [AIMessage(content=case.answer)]
+    response = await post(rig, payload, headers=headers)
+    delivered = assert_safe_delivery(case, voice_fragments(response), model.prompts[prior_calls:])
+    snapshot = await graph.aget_state({"configurable": {"thread_id": "owner::shared"}})
+    assert snapshot.values["messages"][-1].content == delivered
