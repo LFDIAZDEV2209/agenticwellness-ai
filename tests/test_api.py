@@ -92,6 +92,28 @@ def test_chat_returns_answer(client):
     assert body["agent"] == "base"
 
 
+@pytest.mark.parametrize("path", ["/api/v1/chat", "/api/v1/chat/stream"])
+def test_chat_logs_do_not_join_correlations_to_patient_or_thread(client, caplog, path):
+    caplog.set_level("INFO", logger="app.api.routes.chat")
+    result = client.post(
+        path,
+        headers={**HEADERS, "X-Correlation-ID": "external-correlation-marker"},
+        json={
+            "message": "Prueba sintética",
+            "user_id": "synthetic-patient-marker",
+            "thread_id": "synthetic-thread-marker",
+        },
+    )
+    assert result.is_success
+    for identifier in (
+        "external-correlation-marker",
+        "synthetic-patient-marker",
+        "synthetic-thread-marker",
+        '"execution_id"',
+    ):
+        assert identifier not in caplog.text
+
+
 def test_chat_stream_sse(client):
     with client.stream(
         "POST", "/api/v1/chat/stream", json={"message": "hola"}, headers=HEADERS

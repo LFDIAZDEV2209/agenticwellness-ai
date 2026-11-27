@@ -357,7 +357,7 @@ def _normalize_suggestions(raw: Any) -> list[ChatSuggestion]:
         try:
             suggestions.append(ChatSuggestion.model_validate(item))
         except Exception:
-            logger.debug("Sugerencia de chat descartada (malformada): %s", item)
+            logger.debug("Sugerencia de chat descartada (malformada)")
     return suggestions
 
 
@@ -447,16 +447,6 @@ async def chat(
 
     # Correlation ID propagado por el backend (X-Correlation-ID) para trazar
     # la cadena Frontend → Backend → AI en los logs.
-    correlation_id = http_request.headers.get("x-correlation-id")
-    if correlation_id:
-        logger.info(
-            "chat: correlation_id=%s user=%s thread=%s agent=%s",
-            correlation_id,
-            request.user_id,
-            thread_id,
-            request.agent_type_id or request.agent or "base",
-        )
-
     attachment_context = await _prepare_attachments(request, thread_id, session)
     history_binding = await _prepare_chat_history(request, thread_id, base_graph)
     graph, recursion_limit, version_id, provider, model = await _resolve_graph(
@@ -638,16 +628,6 @@ async def chat_stream(
     """Streaming del agente vía Server-Sent Events (tokens + nodos en vivo)."""
     _check_rate_limit(http_request, request.user_id)
     thread_id = request.thread_id or str(uuid.uuid4())
-
-    correlation_id = http_request.headers.get("x-correlation-id")
-    if correlation_id:
-        logger.info(
-            "chat/stream: correlation_id=%s user=%s thread=%s agent=%s",
-            correlation_id,
-            request.user_id,
-            thread_id,
-            request.agent_type_id or request.agent or "base",
-        )
 
     attachment_context = await _prepare_attachments(request, thread_id, session)
     history_binding = await _prepare_chat_history(request, thread_id, base_graph)
