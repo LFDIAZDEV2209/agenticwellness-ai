@@ -4,6 +4,7 @@ import asyncio
 import base64
 import io
 import logging
+import math
 import wave
 from contextlib import suppress
 from typing import Literal
@@ -29,6 +30,8 @@ MAX_BYTES = 2 * 1024 * 1024
 MAX_SECONDS = 20
 RATE = 16000
 MAX_CHARS = 1400
+MIN_SPEECH_LOGPROB = -0.85
+MAX_NO_SPEECH = 0.6
 FORMATS = {"audio/mp4": "mov", "audio/webm": "matroska", "audio/wav": "wav"}
 slots = asyncio.Semaphore(2)
 
@@ -119,6 +122,33 @@ async def speak(text: str, language: Language) -> bytes:
         )
 
 
+def _unclear_recording(payload: dict) -> bool:
+    segments = payload.get("segments")
+    if not segments:
+        return True
+    for segment in segments:
+        score = segment.get("avg_logprob")
+        no_speech = segment.get("no_speech_prob")
+        if (
+            not isinstance(score, (float, int))
+            or not isinstance(no_speech, (float, int))
+            or not math.isfinite(score)
+            or not math.isfinite(no_speech)
+            or score < MIN_SPEECH_LOGPROB
+            or no_speech >= MAX_NO_SPEECH
+        ):
+            return True
+    return False
+
+
+def _ask_to_repeat(language: Language) -> str:
+    return (
+        "No entendí bien la grabación. ¿Puedes decirlo de nuevo?"
+        if language == "es"
+        else "I couldn't make out the recording. Could you say it again?"
+    )
+
+
 @router.post("/turn", response_model=TapVoiceResponse)
 async def voice_turn(request: Request, response: Response) -> TapVoiceResponse:
     response.headers["Cache-Control"] = "no-store"
@@ -150,16 +180,30 @@ async def voice_turn(request: Request, response: Response) -> TapVoiceResponse:
             async with httpx.AsyncClient(trust_env=False, follow_redirects=False) as http:
                 stt = await http.post(
                     f"http://127.0.0.1:{settings.vita_tap_stt_port}/inference",
-                    data={"language": language, "response_format": "json", "temperature": "0.0"},
+                    data={
+                        "language": language,
+                        "response_format": "verbose_json",
+                        "temperature": "0.0",
+                        "temperature_inc": "0.0",
+                        "no_language_probabilities": "true",
+                    },
                     files={"file": ("utterance.wav", wav, "audio/wav")},
                     timeout=10,
                 )
                 stt.raise_for_status()
-                transcript = stt.json()["text"].strip()
-                if not transcript or len(transcript) > MAX_CHARS:
+                speech = stt.json()
+                transcript = " ".join(speech["text"].split())
+                if len(transcript) > MAX_CHARS:
                     raise InvalidAudioError()
                 reason = protected_input_reason(transcript)
-                if reason is None:
+                if not transcript or _unclear_recording(speech):
+                    # Ante un audio ambiguo no entregar al modelo una frase que
+                    # podría invertir lo que quiso decir la persona.
+                    reply = _ask_to_repeat(language)
+                    if reason not in {"emergency_local", "emergency_us"}:
+                        reason = None
+                        transcript = ""
+                elif reason is None:
                     answer = await http.post(
                         f"http://127.0.0.1:{settings.vita_tap_chat_port}/v1/chat/completions",
                         json={
@@ -170,6 +214,9 @@ async def voice_turn(request: Request, response: Response) -> TapVoiceResponse:
                                     "content": PATIENT_SCOPE_POLICY
                                     + "\nNo access to patient records, tools, or plans. "
                                     + "Do not claim you looked up or saved anything. "
+                                    + "Ask one clarification if the transcript is unclear. "
+                                    + "No invented targets, quantities, or schedules. "
+                                    + "Use at most two short sentences without Markdown. "
                                     + "Reply for speech in "
                                     + ("Spanish." if language == "es" else "English."),
                                 },
@@ -182,12 +229,16 @@ async def voice_turn(request: Request, response: Response) -> TapVoiceResponse:
                         timeout=12,
                     )
                     answer.raise_for_status()
-                    reply = answer.json()["choices"][0]["message"]["content"].strip()
+                    choice = answer.json()["choices"][0]
+                    reply = choice["message"]["content"].strip()
                     if not reply or len(reply) > MAX_CHARS:
                         raise ValueError()
-                    reason = emergency_delivery_reason(reply, transcript, "") or classify_output(
-                        reply
-                    )
+                    if choice.get("finish_reason") == "length":
+                        reason = "provider_failure"
+                    else:
+                        reason = emergency_delivery_reason(
+                            reply, transcript, ""
+                        ) or classify_output(reply)
                 else:
                     reply = ""
                 if reason is not None:

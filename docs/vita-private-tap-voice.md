@@ -11,8 +11,10 @@ AI Service convierte WebM/MP4/WAV en WAV mono de 16 kHz en memoria, transcribe
 en un sidecar privado, aplica la seguridad de Vita antes y después de generar,
 y sintetiza la respuesta con eSpeak NG. Los sidecars solo se contactan por
 loopback. No se usan claves externas, herramientas, historiales ni embeddings.
-No se guarda audio, transcripción o respuesta. El cliente muestra el turno
-efímero y permite volver a reproducir si el navegador bloquea el autoplay.
+No se guarda audio, transcripción o respuesta. Cuando la confianza de voz es
+baja o no se detecta habla, responde con una solicitud audible de repetición
+sin pedir al modelo que adivine el texto. El cliente muestra el turno efímero
+y permite volver a reproducir si el navegador bloquea el autoplay.
 
 ## Preparar un entorno aislado
 
@@ -47,3 +49,24 @@ efímero y permite volver a reproducir si el navegador bloquea el autoplay.
 Cerrar KAN-165 requiere además la evidencia de las otras rutas de IA,
 retención y acuerdo. Estas señales no autorizan deshabilitar la voz actual
 en TestFlight ni sustituir una revisión de despliegue.
+
+
+## Perfil reproducido localmente
+
+- whisper.cpp v1.8.3 (`2eeeba56`), con
+  [`ggml-small-q5_1.bin`](https://huggingface.co/ggerganov/whisper.cpp/tree/5359861c739e955e79d9a303bcbc70fb988958b1).
+  Verificar SHA-1 `6fe57ddcfdd1c6b07cdcc73aaf620810ce5fc771` y usar el
+  endpoint `/inference` con `verbose_json` para confianza por segmento.
+- llama.cpp b12774 con
+  [Qwen2.5-1.5B Instruct Q4_K_M](https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/tree/91cad51170dc346986eccefdc2dd33a9da36ead9).
+  SHA-256 `6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e`.
+  Alias `vita-local`, modo offline, una ranura y contexto de 4.096 tokens.
+- Para repetir la prueba de navegador, colocar `es.webm` y `en.webm` en
+  `COP_E2E_TAP_BILINGUAL_AUDIO_DIR`, y apuntar `COP_E2E_TAP_GATEWAY_URL` a
+  un host local de pruebas con autenticación sintética. La prueba verifica
+  la intención de una pregunta fija sobre recordar beber agua en cada idioma
+  y reproduce el WAV con el reproductor real de Chromium.
+- Ejecutar con solo interfaz loopback; en Linux se puede usar
+  `unshare -Urn` y habilitar `lo` dentro de ese espacio de red. Este perfil
+  demuestra integración, no calidad en todos los acentos ni capacidad o
+  ausencia de egreso del despliegue de FYA.
