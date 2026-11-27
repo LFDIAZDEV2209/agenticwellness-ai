@@ -99,6 +99,10 @@ class Settings(BaseSettings):
     vita_turn_log_enabled: bool = True
     vita_context_token_budget: int = Field(default=12_000, ge=4_000, le=200_000)
     vita_voice_enabled: bool = False
+    vita_private_tap_enabled: bool = False
+    vita_tap_stt_port: int = Field(default=8081, ge=1024, le=65535)
+    vita_tap_chat_port: int = Field(default=8082, ge=1024, le=65535)
+    vita_tap_model: str = "vita-local"
     vita_transcript_sync_enabled: bool = False
     vita_transcript_sync_timeout: float = Field(default=5, gt=0, le=10)
     vita_voice_transport_verified: bool = False

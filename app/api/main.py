@@ -23,6 +23,7 @@ from app.api.routes import (
     threads,
     vita_attachments,
     vita_documents,
+    vita_tap_voice,
     vita_voice,
     voice,
 )
@@ -107,6 +108,7 @@ def create_app() -> FastAPI:
     app.include_router(vita_documents.router)
     app.include_router(vita_attachments.router)
     app.include_router(vita_voice.router)
+    app.include_router(vita_tap_voice.router)
     app.include_router(program_narrative.router)
     app.include_router(content_translation.router)
     app.include_router(nutrition_draft.router)

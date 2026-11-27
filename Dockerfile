@@ -12,6 +12,13 @@ RUN apt-get update \
        libgssapi-krb5-2 \
     && rm -rf /var/lib/apt/lists/*
 
+# Solo la imagen de piloto necesita codecs y síntesis local.
+ARG INSTALL_PRIVATE_TAP=false
+RUN if [ "$INSTALL_PRIVATE_TAP" = "true" ]; then \
+      apt-get update && apt-get install -y --no-install-recommends espeak-ng ffmpeg \
+      && rm -rf /var/lib/apt/lists/*; \
+    fi
+
 COPY requirements-prod.txt requirements-prod-constraints.txt ./
 
 RUN pip install --no-cache-dir --upgrade pip \
