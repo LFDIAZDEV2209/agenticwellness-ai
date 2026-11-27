@@ -93,27 +93,10 @@ async def create_voice_session(payload: VoiceSessionRequest) -> VoiceSessionResp
             version_id = None
         session = await create_signed_url(settings, settings.elevenlabs_agent_id, version_id)
     except VoiceSessionError as exc:
-        # Mapeo a HTTP: el detalle interno quedó logueado en el cliente.
+        # No relacionar el evento con pacientes ni conversaciones del proveedor.
         status = exc.status or 502
-        logger.error(
-            "Voice session fallo (user_id=%s, status=%s): %s",
-            payload.user_id,
-            status,
-            exc.safe_message,
-        )
+        logger.error("voice_session_issue_failed status=%s", status)
         raise HTTPException(status_code=status, detail=exc.safe_message) from exc
-
-    # Auditoría estructurada SIN datos sensibles: ids internos y agentes,
-    # nunca el signed URL, la key ni contenido clínico.
-    logger.info(
-        "Voice session creada (user_id=%s, patient_id=%s, thread_id=%s, agent_id=%s, "
-        "conversation_id=%s)",
-        payload.user_id,
-        payload.patient_id or "-",
-        payload.thread_id or "-",
-        settings.elevenlabs_agent_id,
-        session["conversation_id"] or "-",
-    )
 
     extra = {}
     if payload.supports_vita_voice:
@@ -135,6 +118,7 @@ async def create_voice_session(payload: VoiceSessionRequest) -> VoiceSessionResp
             "expires_at": record.expires_at,
             "runtime_mode": "legacy",
         }
+    logger.info("voice_session_issued mode=legacy")
     return VoiceSessionResponse(
         signed_url=session["signed_url"],
         agent_id=settings.elevenlabs_agent_id,

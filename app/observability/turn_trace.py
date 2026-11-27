@@ -88,7 +88,7 @@ class TurnTrace:
     events: list[TraceEvent] = field(default_factory=list)
 
     def to_log(self) -> dict[str, Any]:
-        """Resumen estructurado para logs técnicos: sin paciente ni hilo en claro."""
+        """Métricas sin claves que enlacen con filas privadas de la conversación."""
         return {
             "channel": self.channel,
             "agent": self.agent_id,
@@ -97,7 +97,6 @@ class TurnTrace:
             "tokens_in": self.tokens_in,
             "tokens_out": self.tokens_out,
             "error_code": self.error_code,
-            "execution_id": self.execution_id,
             "events": [
                 {
                     "kind": e.kind,

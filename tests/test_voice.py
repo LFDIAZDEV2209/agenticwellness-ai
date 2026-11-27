@@ -91,7 +91,7 @@ def test_accepts_a_complete_legacy_brand_pair(language):
         voice_client._validate_patient_version(payload, "agent_test", VERSIONS[language], language)
 
 
-def test_provider_url_only_response_starts_linked_legacy_session(monkeypatch):
+def test_provider_url_only_response_starts_linked_legacy_session(monkeypatch, caplog):
     """Forma real de ElevenLabs US: ID reservado dentro del URL, no en el JSON."""
     store = AsyncMock()
     monkeypatch.setattr("app.voice.vita_session.voice_store.create", store)
@@ -111,6 +111,7 @@ def test_provider_url_only_response_starts_linked_legacy_session(monkeypatch):
         )
 
     _transport(monkeypatch, handler)
+    caplog.set_level("INFO", logger="app.api.routes.voice")
     with TestClient(create_app()) as client:
         response = client.post(
             URL,
@@ -128,6 +129,8 @@ def test_provider_url_only_response_starts_linked_legacy_session(monkeypatch):
     assert response.json()["session_id"]
     store.assert_awaited_once()
     assert store.call_args.args[0].conversation_id == "conv_reserved"
+    for identifier in ("u-test", "thread-test", "conv_reserved", "synthetic-only"):
+        assert identifier not in caplog.text
 
 
 @pytest.mark.parametrize(
